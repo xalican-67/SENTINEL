@@ -1,0 +1,17 @@
+{
+  "name": "sentinel",
+  "version": "1.0.0",
+  "description": "SENTINEL -- Final SSS System | Throughput Model | Algorithm-gated | P5 default | $2.401T/day",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node --max-old-space-size=150 --expose-gc --gc-interval=100 src/index.js"
+  },
+  "dependencies": {
+    "ethers":  "6.17.0",
+    "express": "4.19.2",
+    "ws":      "8.18.0",
+    "solc":    "0.8.26"
+  },
+  "engines": { "node": ">=20.0.0" }
+}
