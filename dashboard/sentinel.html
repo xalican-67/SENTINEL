@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SENTINEL</title>
+<link rel="stylesheet" href="sentinel.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo">SENTINEL</div>
+    <div class="tagline">7-Point Live Check | MEV + Blocks | 20 Chains</div>
+    <div class="hdr-right">
+      <span class="dot" id="dot"></span>
+      <span id="status">CONNECTING</span>
+      <span id="uptime">up: 0s</span>
+    </div>
+  </header>
+
+  <nav id="nav">
+    <button class="tab active" data-tab="overview">Overview</button>
+    <button class="tab" data-tab="livecheck">LiveCheck</button>
+    <button class="tab" data-tab="flash">Flash</button>
+    <button class="tab" data-tab="executor">Executor</button>
+    <button class="tab" data-tab="propeller">Propeller</button>
+    <button class="tab" data-tab="chains">Chains</button>
+    <button class="tab" data-tab="mev">MEV</button>
+    <button class="tab" data-tab="treasury">Treasury</button>
+    <button class="tab" data-tab="recycler">Recycler</button>
+    <button class="tab" data-tab="oracle">Oracle</button>
+    <button class="tab" data-tab="contracts">Contracts</button>
+    <button class="tab" data-tab="signals">Signals</button>
+    <button class="tab" data-tab="gas">Gas</button>
+    <button class="tab" data-tab="diagnostics">Diagnostics</button>
+    <button class="tab" data-tab="ftw">FTW ↗</button>
+  </nav>
+
+  <!-- OVERVIEW -->
+  <div id="tab-overview" class="tab-content active">
+    <div class="banner" id="ov-banner">SENTINEL OPERATIONAL | P10 ACTIVE | 7-POINT LIVE CHECK EVERY CYCLE</div>
+    <div class="grid-3">
+      <div class="card"><div class="label">Revenue Today</div><div class="value green lg" id="ov-rev">$0</div></div>
+      <div class="card"><div class="label">Vault USDC (on-chain)</div><div class="value green lg" id="ov-vault">$0</div></div>
+      <div class="card"><div class="label">All-Time Revenue</div><div class="value lg" id="ov-total">$0</div></div>
+    </div>
+    <div class="grid-4">
+      <div class="card"><div class="label">Cycles Today</div><div class="value" id="ov-cycles">0</div></div>
+      <div class="card"><div class="label">Skipped</div><div class="value dim" id="ov-skip">0</div></div>
+      <div class="card"><div class="label">Propeller</div><div class="value gold" id="ov-prop">P10</div></div>
+      <div class="card"><div class="label">Chains</div><div class="value" id="ov-chains">0/20</div></div>
+    </div>
+    <div class="card full">
+      <div class="label">Daily Progress — <span id="ov-target">no ceiling</span></div>
+      <div class="progress-bar"><div class="progress-fill" id="ov-progress" style="width:0%"></div></div>
+      <div class="progress-labels">
+        <span id="ov-pct">0%</span><span id="ov-rev-target">$0</span>
+      </div>
+    </div>
+    <div class="grid-3">
+      <div class="card"><div class="label">Live Flash Read</div><div class="value green" id="ov-flash">$0</div></div>
+      <div class="card"><div class="label">Reconcile Score</div><div class="value" id="ov-score">100%</div></div>
+      <div class="card"><div class="label">Net (70% split)</div><div class="value" id="ov-net">$0</div></div>
+    </div>
+  </div>
+
+  <!-- LIVECHECK -->
+  <div id="tab-livecheck" class="tab-content">
+    <div class="section-title">7-Point Live Algorithm — runs before every cycle</div>
+    <div id="check-grid" class="check-grid">
+      <div class="check-card" id="chk-1">
+        <div class="chk-num">CHECK 1</div>
+        <div class="chk-name">Flash Capital</div>
+        <div class="chk-desc">Query Balancer + Aave live. Reduce to actual available.</div>
+        <div class="chk-passes" id="c1-passes">0 passes</div>
+      </div>
+      <div class="check-card" id="chk-2">
+        <div class="chk-num">CHECK 2</div>
+        <div class="chk-name">Gas Price</div>
+        <div class="chk-desc">Compute gas cost vs expected profit. Skip if gas > 1%.</div>
+        <div class="chk-passes" id="c2-passes">0 passes</div>
+      </div>
+      <div class="check-card" id="chk-3">
+        <div class="chk-num">CHECK 3</div>
+        <div class="chk-name">Spread Check</div>
+        <div class="chk-desc">Query Uniswap V3 + Balancer. Skip if spread insufficient.</div>
+        <div class="chk-passes" id="c3-passes">0 passes</div>
+      </div>
+      <div class="check-card" id="chk-4">
+        <div class="chk-num">CHECK 4</div>
+        <div class="chk-name">Oracle Freshness</div>
+        <div class="chk-desc">Chainlink ETH/BTC/MATIC/USDC must be &lt; 5 min old.</div>
+        <div class="chk-passes" id="c4-passes">0 passes</div>
+      </div>
+      <div class="check-card" id="chk-5">
+        <div class="chk-num">CHECK 5</div>
+        <div class="chk-name">Pool Depth</div>
+        <div class="chk-desc">Read reserves. Compute slippage. Skip if slippage > profit.</div>
+        <div class="chk-passes" id="c5-passes">0 passes</div>
+      </div>
+      <div class="check-card" id="chk-6">
+        <div class="chk-num">CHECK 6</div>
+        <div class="chk-name">Treasury Balance</div>
+        <div class="chk-desc">Read USDC on-chain. Compare confirmed vs computed.</div>
+        <div class="chk-passes" id="c6-passes">0 passes</div>
+      </div>
+      <div class="check-card" id="chk-7">
+        <div class="chk-num">CHECK 7</div>
+        <div class="chk-name">Propeller Ceiling</div>
+        <div class="chk-desc">Cycles today vs max. Gas budget vs daily limit.</div>
+        <div class="chk-passes" id="c7-passes">0 passes</div>
+      </div>
+    </div>
+    <div class="card full">
+      <div class="label">Recent Skip Reasons</div>
+      <div id="skip-log" class="log-box"></div>
+    </div>
+  </div>
+
+  <!-- FLASH -->
+  <div id="tab-flash" class="tab-content">
+    <div class="section-title">Live Flash Capital</div>
+    <div class="grid-3">
+      <div class="card"><div class="label">Total Live Read</div><div class="value green lg" id="fl-live">$0</div></div>
+      <div class="card"><div class="label">Balancer V2 (0% fee)</div><div class="value green" id="fl-bal">$0</div></div>
+      <div class="card"><div class="label">Aave V3 (0.09% fee)</div><div class="value" id="fl-aave">$0</div></div>
+    </div>
+    <div class="card full">
+      <div class="label">Architecture</div>
+      <div class="arch-row"><span class="arch-key">Balancer</span><span>Vault consolidates all pool liquidity. 0% fee. Live read before every cycle.</span></div>
+      <div class="arch-row"><span class="arch-key">Aave V3</span><span>Available pool balance per asset. 0.09% fee. Live read before every cycle.</span></div>
+      <div class="arch-row"><span class="arch-key">Extraction</span><span>10% target per cycle. If flash = $100M → target profit = $10M. Strategy determines actual.</span></div>
+      <div class="arch-row"><span class="arch-key">Minimum</span><span>$1M flash required. Below this — cycle skipped (CHECK 1).</span></div>
+    </div>
+  </div>
+
+  <!-- EXECUTOR -->
+  <div id="tab-executor" class="tab-content">
+    <div class="section-title">Executor Control</div>
+    <div class="grid-2">
+      <div class="card"><div class="label">Gas Price</div><div class="value" id="ex-gas">0 gwei</div></div>
+      <div class="card"><div class="label">Status</div><div class="value" id="ex-status">—</div></div>
+    </div>
+    <div class="grid-4">
+      <div class="card"><div class="label">Cycles Today</div><div class="value" id="ex-cycles">0</div></div>
+      <div class="card"><div class="label">Success</div><div class="value green" id="ex-succ">0</div></div>
+      <div class="card"><div class="label">Failed</div><div class="value red" id="ex-fail">0</div></div>
+      <div class="card"><div class="label">Skipped</div><div class="value dim" id="ex-skip">0</div></div>
+    </div>
+    <div class="card full">
+      <div class="label">Avg Cycle Speed</div>
+      <div class="value" id="ex-speed">0ms</div>
+    </div>
+    <div class="control-panel">
+      <div class="btn-row">
+        <button onclick="api('/api/executor/pause','POST')" class="btn-danger">⏸ Pause</button>
+        <button onclick="api('/api/executor/resume','POST')" class="btn-success">▶ Resume</button>
+        <button onclick="api('/api/reconcile','POST').then(d=>alert(`Score: ${d.score?.toFixed(1)}%`))" class="btn-primary">↺ Reconcile Now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PROPELLER -->
+  <div id="tab-propeller" class="tab-content">
+    <div class="section-title">Propeller Governor — hard cycle ceiling</div>
+    <div class="grid-2">
+      <div class="card"><div class="label">Active Level</div><div class="value gold lg" id="pr-active">P10</div></div>
+      <div class="card"><div class="label">Ceiling Used Today</div><div class="value" id="pr-ceiling">0%</div></div>
+    </div>
+    <div id="pr-grid" class="propeller-grid"></div>
+  </div>
+
+  <!-- CHAINS -->
+  <div id="tab-chains" class="tab-content">
+    <div class="section-title">20 Chain Network</div>
+    <div class="grid-3">
+      <div class="card"><div class="label">Connected</div><div class="value green" id="ch-count">0/20</div></div>
+      <div class="card"><div class="label">Blocks Today</div><div class="value" id="ch-blocks">0</div></div>
+      <div class="card"><div class="label">Max Blocks/Day</div><div class="value dim">1,526,682</div></div>
+    </div>
+    <div id="ch-grid" class="chain-grid"></div>
+  </div>
+
+  <!-- MEV -->
+  <div id="tab-mev" class="tab-content">
+    <div class="section-title">MEV Strategy Breakdown</div>
+    <div class="grid-4">
+      <div class="card"><div class="label">JIT Liquidity</div><div class="value green" id="mev-jit">0</div></div>
+      <div class="card"><div class="label">Arbitrage</div><div class="value" id="mev-arb">0</div></div>
+      <div class="card"><div class="label">Sandwich</div><div class="value" id="mev-sw">0</div></div>
+      <div class="card"><div class="label">Liquidation</div><div class="value" id="mev-liq">0</div></div>
+    </div>
+    <div class="card full">
+      <div class="label">Strategy Logic</div>
+      <div class="arch-row"><span class="arch-key">JIT</span><span>Provide Uniswap V3 liquidity for one block before large swap. Capture 0.05% LP fee. Withdraw after.</span></div>
+      <div class="arch-row"><span class="arch-key">ARB</span><span>Exploit price difference between two pools. Borrow flash → swap pool1 → swap pool2 → profit.</span></div>
+      <div class="arch-row"><span class="arch-key">SANDWICH</span><span>Front-run large pending swap. Buy before. Victim executes. Sell after. Keep slippage as profit.</span></div>
+      <div class="arch-row"><span class="arch-key">LIQ</span><span>Liquidate undercollateralised Aave positions. Capture 5–15% bonus on collateral seized.</span></div>
+    </div>
+  </div>
+
+  <!-- TREASURY -->
+  <div id="tab-treasury" class="tab-content">
+    <div class="section-title">Treasury — Confirmed vs Computed</div>
+    <div class="grid-3">
+      <div class="card"><div class="label">Confirmed (on-chain)</div><div class="value green lg" id="tr-conf">$0</div></div>
+      <div class="card"><div class="label">Computed (cumulative)</div><div class="value" id="tr-comp">$0</div></div>
+      <div class="card"><div class="label">Reconciliation Score</div><div class="value" id="tr-score">100%</div></div>
+    </div>
+    <div class="card full">
+      <div class="label">Revenue Split — every cycle</div>
+      <div class="split-bar">
+        <div class="split-t">Treasury 70%</div>
+        <div class="split-r">Recycler 20%</div>
+        <div class="split-v">Reserve 10%</div>
+      </div>
+    </div>
+    <div class="control-panel">
+      <button onclick="api('/api/reconcile','POST').then(d=>{document.getElementById('tr-conf').textContent='$'+d.confirmed?.toFixed(2);document.getElementById('tr-score').textContent=d.score?.toFixed(1)+'%'})" class="btn-primary">Force Reconcile</button>
+    </div>
+  </div>
+
+  <!-- RECYCLER -->
+  <div id="tab-recycler" class="tab-content">
+    <div class="section-title">Recycler — Aave Compound</div>
+    <div class="card"><div class="label">Recycler Balance (Aave)</div><div class="value green" id="rec-bal">$0</div></div>
+    <div class="card full">
+      <div class="label">How it works</div>
+      <div class="arch-row"><span>20% of every cycle profit → SentinelVault → SentinelRecycler → Aave V3 supply</span></div>
+      <div class="arch-row"><span>Aave aToken balance grows → more flash capital available for CHECK 1</span></div>
+      <div class="arch-row"><span>Yield earned on deposited USDC → additional revenue stream</span></div>
+    </div>
+  </div>
+
+  <!-- ORACLE -->
+  <div id="tab-oracle" class="tab-content">
+    <div class="section-title">Chainlink Oracle — Live Prices</div>
+    <div class="grid-3">
+      <div class="card"><div class="label">ETH / USD</div><div class="value green" id="or-eth">$0</div></div>
+      <div class="card"><div class="label">BTC / USD</div><div class="value" id="or-btc">$0</div></div>
+      <div class="card"><div class="label">MATIC / USD</div><div class="value" id="or-matic">$0</div></div>
+    </div>
+    <div class="card full">
+      <div class="label">CHECK 4 — Oracle Freshness</div>
+      <div class="arch-row"><span>All prices must be updated within 5 minutes (300 seconds). Stale price = cycle skip.</span></div>
+    </div>
+  </div>
+
+  <!-- CONTRACTS -->
+  <div id="tab-contracts" class="tab-content">
+    <div class="section-title">Deployed Contracts</div>
+    <div class="card full"><div class="label">Status</div><div class="value" id="ct-status">Awaiting 0.1 POL</div></div>
+    <div id="ct-list" class="contract-list"></div>
+    <div class="card full"><div class="label">Executor</div><div class="addr" id="ct-exec">—</div></div>
+  </div>
+
+  <!-- SIGNALS -->
+  <div id="tab-signals" class="tab-content">
+    <div class="section-title">Cycle Signal Log</div>
+    <div class="grid-3">
+      <div class="card"><div class="label">Submitted</div><div class="value" id="sig-sub">0</div></div>
+      <div class="card"><div class="label">Landed</div><div class="value green" id="sig-land">0</div></div>
+      <div class="card"><div class="label">Landing Rate</div><div class="value" id="sig-rate">0%</div></div>
+    </div>
+    <div id="sig-log" class="log-box"></div>
+  </div>
+
+  <!-- GAS -->
+  <div id="tab-gas" class="tab-content">
+    <div class="section-title">Gas Management</div>
+    <div class="grid-3">
+      <div class="card"><div class="label">Current Gas</div><div class="value" id="gs-price">0 gwei</div></div>
+      <div class="card"><div class="label">Daily Spent</div><div class="value" id="gs-spent">0 POL</div></div>
+      <div class="card"><div class="label">Daily Budget</div><div class="value dim">50 POL</div></div>
+    </div>
+    <div class="card full">
+      <div class="label">CHECK 2 — Gas vs Profit</div>
+      <div class="arch-row"><span>Gas cost computed in USD using live MATIC price. Skip if gas > 1% of expected profit.</span></div>
+    </div>
+  </div>
+
+  <!-- DIAGNOSTICS -->
+  <div id="tab-diagnostics" class="tab-content">
+    <div class="section-title">System Diagnostics</div>
+    <div class="grid-4">
+      <div class="card"><div class="label">Heap</div><div class="value" id="dg-mb">0MB</div></div>
+      <div class="card"><div class="label">WebSocket Clients</div><div class="value" id="dg-ws">0</div></div>
+      <div class="card"><div class="label">Uptime</div><div class="value" id="dg-up">0s</div></div>
+      <div class="card"><div class="label">First Revenue</div><div class="value" id="dg-first">Pending</div></div>
+    </div>
+    <div class="card full">
+      <div class="label">7-Point Check Pass Counts (today)</div>
+      <div id="dg-checks" class="check-summary"></div>
+    </div>
+  </div>
+
+  <!-- FTW -->
+  <div id="tab-ftw" class="tab-content">
+    <div class="section-title">FTW — Flash To Wallet</div>
+    <div class="card full">
+      <div class="label">Available for Withdrawal</div>
+      <div class="value green lg" id="ftw-avail">$0 USDC</div>
+    </div>
+    <div class="card full">
+      <div class="ftw-form">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Amount (USDC)</label>
+            <input type="number" id="ftw-amount" placeholder="1000" min="1">
+          </div>
+          <div class="form-group">
+            <label>Network</label>
+            <select id="ftw-network">
+              <option value="wave">Wave Mobile Money</option>
+              <option value="afrimoney">Afrimoney</option>
+              <option value="qmoney">QMoney</option>
+              <option value="bank">Bank Transfer (GMD)</option>
+              <option value="international">International Wire</option>
+              <option value="crypto">Crypto</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Phone / Account</label>
+            <input type="text" id="ftw-phone" placeholder="+220XXXXXXX">
+          </div>
+          <div class="form-group">
+            <label>Beneficiary Name</label>
+            <input type="text" id="ftw-name" placeholder="Bun Omar SECKA">
+          </div>
+        </div>
+        <div id="ftw-quote" class="quote-box hidden"></div>
+        <div class="btn-row">
+          <button onclick="getQuote()" class="btn-primary">Get Quote</button>
+          <button onclick="doWithdraw()" class="btn-success" id="ftw-btn" disabled>Withdraw Now</button>
+        </div>
+        <div id="ftw-result" class="result-box hidden"></div>
+      </div>
+    </div>
+    <div class="card full">
+      <div class="section-title">Fee Schedule</div>
+      <div class="fee-row"><span>Wave / Afrimoney / QMoney</span><span class="gold">1.5%</span></div>
+      <div class="fee-row"><span>Bank Transfer (GMD)</span><span class="gold">1.25%</span></div>
+      <div class="fee-row"><span>International Wire</span><span class="gold">1.25%</span></div>
+      <div class="fee-row"><span>Crypto</span><span class="gold">1.0%</span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let S = {}
+const ws = new WebSocket(`ws://${location.host}`)
+
+ws.onopen    = () => { document.getElementById('status').textContent = 'LIVE'; document.getElementById('dot').className = 'dot green' }
+ws.onclose   = () => { document.getElementById('status').textContent = 'DISCONNECTED'; document.getElementById('dot').className = 'dot red'; setTimeout(()=>location.reload(),5000) }
+ws.onmessage = e => { try { S = JSON.parse(e.data); render() } catch {} }
+
+function f(n) {
+  if (!n) return '$0'
+  if (n >= 1e12) return '$'+(n/1e12).toFixed(4)+'T'
+  if (n >= 1e9)  return '$'+(n/1e9).toFixed(4)+'B'
+  if (n >= 1e6)  return '$'+(n/1e6).toFixed(4)+'M'
+  if (n >= 1e3)  return '$'+(n/1e3).toFixed(2)+'K'
+  return '$'+n.toFixed(2)
+}
+
+function t(id, v) { const el = document.getElementById(id); if (el) el.textContent = v }
+function fmtUp(s) { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60; return `up: ${h}h ${m}m ${sec}s` }
+
+function render() {
+  if (!S || S.booting) return
+  t('uptime', fmtUp(S.uptime||0))
+
+  // Overview
+  t('ov-rev',    f(S.revToday))
+  t('ov-vault',  f(S.vaultConfirmed))
+  t('ov-total',  f(S.revTotal))
+  t('ov-cycles', (S.cyclesToday||0).toLocaleString())
+  t('ov-skip',   (S.skipToday||0).toLocaleString())
+  t('ov-prop',   S.propeller||'P10')
+  t('ov-chains', (S.chainCount||0)+'/20')
+  t('ov-net',    f(S.netToday))
+  t('ov-flash',  f(S.flashLive))
+  const score = S.reconcileScore||100
+  const scoreEl = document.getElementById('ov-score')
+  if (scoreEl) { scoreEl.textContent = score.toFixed(1)+'%'; scoreEl.className = 'value '+(score>95?'green':score>90?'gold':'red') }
+  const prog = S.progress||0
+  const pFill = document.getElementById('ov-progress')
+  if (pFill) pFill.style.width = Math.min(prog,100)+'%'
+  t('ov-pct', prog.toFixed(2)+'%')
+  t('ov-rev-target', f(S.revToday)+' / '+(S.dailyTarget===Number.MAX_SAFE_INTEGER?'∞':f(S.dailyTarget)))
+  t('ov-target', S.dailyTarget===Number.MAX_SAFE_INTEGER?'no ceiling':f(S.dailyTarget)+' target')
+
+  // LiveCheck
+  const checks = S.checks||{}
+  ;[1,2,3,4,5,6,7].forEach(i => {
+    const el = document.getElementById(`c${i}-passes`)
+    if (el) el.textContent = (checks['c'+i]||0).toLocaleString()+' passes'
+    const card = document.getElementById('chk-'+i)
+    if (card) card.className = 'check-card ' + ((checks['c'+i]||0) > 0 ? 'pass' : '')
+  })
+
+  // Flash
+  t('fl-live', f(S.flashLive))
+  t('fl-bal',  f(S.flashBalancer))
+  t('fl-aave', f(S.flashAave))
+
+  // Executor
+  t('ex-gas',    (S.gasPrice||0).toFixed(1)+' gwei')
+  const stEl = document.getElementById('ex-status')
+  if (stEl) { stEl.textContent = S.gasOK?'✓ ACTIVE':'⚠ PAUSED'; stEl.className='value '+(S.gasOK?'green':'red') }
+  t('ex-cycles', (S.cyclesToday||0).toLocaleString())
+  t('ex-succ',   (S.successToday||0).toLocaleString())
+  t('ex-fail',   (S.failToday||0).toLocaleString())
+  t('ex-skip',   (S.skipToday||0).toLocaleString())
+  t('ex-speed',  (S.execSpeed||0).toFixed(1)+'ms')
+
+  // Propeller
+  t('pr-active',  S.propeller||'P10')
+  t('pr-ceiling', (S.ceilingPct||0).toFixed(1)+'%')
+  const prDiv = document.getElementById('pr-grid')
+  if (prDiv && S.propellerStats && prDiv.children.length === 0) {
+    prDiv.innerHTML = S.propellerStats.map(p=>`
+      <div class="prop-card ${S.propeller===p.level?'active':''}" id="prop-${p.level}" onclick="setLevel('${p.level}')">
+        <div class="prop-level">${p.level}</div>
+        <div class="prop-label">${p.label}</div>
+        <div class="prop-max">${p.maxCycles===1526682?'all blocks':p.maxCycles.toLocaleString()+' cycles'}</div>
+      </div>`).join('')
+  } else if (prDiv && S.propellerStats) {
+    S.propellerStats.forEach(p => {
+      const el = document.getElementById('prop-'+p.level)
+      if (el) el.className = `prop-card ${S.propeller===p.level?'active':''}`
+    })
+  }
+
+  // Chains
+  t('ch-count',  (S.chainCount||0)+'/20')
+  t('ch-blocks', (S.blockStats?.totalToday||0).toLocaleString())
+  const chDiv = document.getElementById('ch-grid')
+  if (chDiv && S.chainStates) {
+    if (chDiv.children.length===0) {
+      chDiv.innerHTML = Object.entries(S.chainStates).map(([name,ok])=>`
+        <div class="chain-card ${ok?'ok':'err'}" id="chain-${name}">
+          <span>${name}</span><span>${ok?'✓':'✗'}</span>
+        </div>`).join('')
+    } else {
+      Object.entries(S.chainStates).forEach(([name,ok])=>{
+        const el=document.getElementById('chain-'+name)
+        if(el) el.className=`chain-card ${ok?'ok':'err'}`
+      })
+    }
+  }
+
+  // MEV
+  const ms = S.mevStats||{}
+  t('mev-jit', (ms.jit||0).toLocaleString())
+  t('mev-arb', (ms.arb||0).toLocaleString())
+  t('mev-sw',  (ms.sandwich||0).toLocaleString())
+  t('mev-liq', (ms.liq||0).toLocaleString())
+
+  // Treasury
+  t('tr-conf',  f(S.vaultConfirmed))
+  t('tr-comp',  f(S.vaultComputed))
+  const sc = S.reconcileScore||100
+  const scEl = document.getElementById('tr-score')
+  if (scEl) { scEl.textContent=sc.toFixed(1)+'%'; scEl.className='value '+(sc>95?'green':sc>90?'gold':'red') }
+
+  // Recycler
+  t('rec-bal', f(S.recyclerBal))
+
+  // Oracle
+  t('or-eth',   '$'+(S.oracleETH||0).toFixed(2))
+  t('or-btc',   '$'+(S.oracleBTC||0).toFixed(0))
+  t('or-matic', '$'+(S.oracleMATIC||0).toFixed(4))
+
+  // Contracts
+  const deployed = S.deployment
+  const ctSt = document.getElementById('ct-status')
+  if (ctSt) { ctSt.textContent=deployed?`✓ ${S.contracts} contracts deployed`:`Awaiting 0.1 POL → ${S.executor?.slice(0,20)}...`; ctSt.className='value '+(deployed?'green':'gold') }
+  t('ct-exec', S.executor||'—')
+  const ctDiv = document.getElementById('ct-list')
+  if (ctDiv && S.contractAddrs && ctDiv.children.length===0) {
+    ctDiv.innerHTML = Object.entries(S.contractAddrs).map(([k,v])=>`
+      <div class="contract-item">
+        <span class="ct-key">${k}</span>
+        <span class="ct-val ${v?'green':'dim'}">${v||'not deployed'}</span>
+      </div>`).join('')
+  }
+
+  // Signals
+  const bs = S.bundleStats||{}
+  t('sig-sub',  (bs.submitted||0).toLocaleString())
+  t('sig-land', (bs.landed||0).toLocaleString())
+  t('sig-rate', bs.landingRate||'0%')
+  const sigLog = document.getElementById('sig-log')
+  if (sigLog && S.signalLog) {
+    sigLog.innerHTML = S.signalLog.slice(0,20).map(s=>
+      s.skipped
+        ? `<div class="log-row skip">[SKIP] CHECK ${s.checkFailed} — ${s.reason}</div>`
+        : `<div class="log-row ok">[CYCLE ${s.cycleId}] ${f(s.profit||0)} | strategy: ${s.strategy} | ${s.txHash?.slice(0,16)}...</div>`
+    ).join('')
+  }
+
+  // Gas
+  t('gs-price', (S.gasPrice||0).toFixed(1)+' gwei')
+  t('gs-spent', (S.gasSpent||0).toFixed(4)+' POL')
+
+  // Diagnostics
+  t('dg-mb',    (S.mb||0)+'MB')
+  t('dg-ws',    (S.wsClients||0).toString())
+  t('dg-up',    fmtUp(S.uptime||0))
+  const frEl = document.getElementById('dg-first')
+  if (frEl) { frEl.textContent=S.firstRev?'✓ CONFIRMED':'Pending'; frEl.className='value '+(S.firstRev?'green':'dim') }
+  const dgChk = document.getElementById('dg-checks')
+  if (dgChk && S.checks) {
+    const names=['Flash','Gas','Spread','Oracle','Depth','Treasury','Capacity']
+    dgChk.innerHTML = [1,2,3,4,5,6,7].map((i,idx)=>`
+      <div class="check-summary-row">
+        <span class="cs-num">C${i}</span>
+        <span class="cs-name">${names[idx]}</span>
+        <span class="cs-val green">${(S.checks['c'+i]||0).toLocaleString()} passes</span>
+      </div>`).join('')
+  }
+
+  // FTW
+  t('ftw-avail', f(S.vaultConfirmed)+' USDC')
+}
+
+// Tabs
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-content').forEach(el=>el.classList.remove('active'))
+    document.querySelectorAll('.tab').forEach(el=>el.classList.remove('active'))
+    document.getElementById('tab-'+btn.dataset.tab)?.classList.add('active')
+    btn.classList.add('active')
+  })
+})
+
+// Actions
+async function api(url, method='POST', body) {
+  const r = await fetch(url, {
+    method,
+    headers: body?{'Content-Type':'application/json'}:{},
+    body: body?JSON.stringify(body):undefined,
+  })
+  return r.json()
+}
+
+async function setLevel(level) { await api('/api/propeller','POST',{level}) }
+
+// FTW
+async function getQuote() {
+  const amount = parseFloat(document.getElementById('ftw-amount').value)
+  const network = document.getElementById('ftw-network').value
+  if (!amount) return
+  const d = await api('/api/ftw/quote','POST',{amount,network})
+  const qb = document.getElementById('ftw-quote')
+  qb.innerHTML = `Gross: <b>$${d.gross}</b> | Fee: <b>$${d.fee}</b> (${d.rate}) | Net: <b class="green">$${d.net}</b> via ${network}`
+  qb.classList.remove('hidden')
+  document.getElementById('ftw-btn').disabled = false
+}
+
+async function doWithdraw() {
+  const amount      = parseFloat(document.getElementById('ftw-amount').value)
+  const network     = document.getElementById('ftw-network').value
+  const phone       = document.getElementById('ftw-phone').value
+  const accountName = document.getElementById('ftw-name').value
+  const rb = document.getElementById('ftw-result')
+  rb.classList.add('hidden')
+  document.getElementById('ftw-btn').disabled = true
+  document.getElementById('ftw-btn').textContent = 'Processing...'
+  try {
+    const d = await api('/api/ftw/withdraw','POST',{amount,network,phone,accountName})
+    rb.innerHTML = d.ok
+      ? `✓ Withdrawal initiated<br>Net: <b>$${d.net} GMD</b><br>Ref: ${d.reference}<br>Via: ${d.network}`
+      : `✗ ${d.error}`
+    rb.className = `result-box ${d.ok?'ok':'err'}`
+  } catch(e) { rb.innerHTML='✗ '+e.message; rb.className='result-box err' }
+  rb.classList.remove('hidden')
+  document.getElementById('ftw-btn').disabled = false
+  document.getElementById('ftw-btn').textContent = 'Withdraw Now'
+}
+</script>
+</body>
+</html>
