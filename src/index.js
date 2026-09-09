@@ -1,6 +1,6 @@
 // src/index.js — SENTINEL boot
 // Workers start ONLY after compiler subprocess fully exits
-// Memory: main 300MB | chains worker 120MB | executor worker 120MB
+// Memory: main 512MB | chains worker 150MB | executor worker 150MB
 
 import { Worker }        from 'worker_threads'
 import { fileURLToPath } from 'url'
@@ -15,14 +15,13 @@ import { startOracle }     from './oracle.js'
 import { startGas }        from './gas.js'
 import { startRecycler }   from './recycler.js'
 import { startReconciler } from './reconciler.js'
-import { startMempool }    from './mempool.js'
 import { startDiag }       from './diag.js'
 import { startDashboard }  from './dashboard.js'
 
 export const SAB = new SharedArrayBuffer(SAB_SIZE)
 export const HOT = new Float64Array(SAB)
 
-// Boot defaults
+// Boot defaults — P10 active
 HOT[H.GAS_OK]          = 1
 HOT[H.PROPELLER]       = 10
 HOT[H.DAILY_TARGET]    = PROPELLER.P10.target
@@ -41,8 +40,7 @@ console.log('╚═════════════════════�
 
 const __dir = path.dirname(fileURLToPath(import.meta.url))
 
-// ── LIGHTWEIGHT SERVICES — start immediately, minimal memory ──────────────────
-// These are cheap — no WS connections, no workers, no solc
+// ── LIGHTWEIGHT SERVICES — cheap, no WS, no workers ──────────────────────────
 startTreasury(HOT)
 startOracle(HOT)
 startGas(HOT)
@@ -51,7 +49,7 @@ startReconciler(HOT)
 startDiag(SAB)
 startDashboard(SAB)
 
-// Uptime + memory tracker
+// Uptime + memory
 setInterval(() => {
   HOT[H.UPTIME]++
   HOT[H.MB] = process.memoryUsage().heapUsed / 1024 / 1024 | 0
@@ -80,15 +78,12 @@ let chainsWorker = null
 let execWorker   = null
 
 // ── START WORKERS — called ONLY after compiler subprocess exits ───────────────
-// This is the critical fix: compiler holds 250MB while running.
-// Workers must not start until compiler has fully exited and freed memory.
 function startWorkers() {
   console.log('[SENTINEL] Starting workers — compiler memory fully released')
 
-  // Chains worker — 20 WebSocket connections
   chainsWorker = new Worker(path.join(__dir, 'chains.js'), {
     workerData: { SAB },
-    resourceLimits: { maxOldGenerationSizeMb: 120 },
+    resourceLimits: { maxOldGenerationSizeMb: 150 },
   })
 
   chainsWorker.on('message', msg => {
@@ -98,20 +93,22 @@ function startWorkers() {
   })
 
   chainsWorker.on('error', e => {
-    console.log(`[CHAINS] ${e.message?.slice(0, 60)}`)
+    console.log(`[CHAINS] Worker error: ${e.message?.slice(0, 60)}`)
   })
 
   chainsWorker.on('exit', code => {
     if (code !== 0) {
-      console.log(`[CHAINS] Worker exited ${code} — restarting in 5s`)
-      setTimeout(startWorkers, 5_000)
+      console.log(`[CHAINS] Worker exited ${code} — restarting in 10s`)
+      setTimeout(() => {
+        chainsWorker = null
+        startWorkers()
+      }, 10_000)
     }
   })
 
-  // Executor worker
   execWorker = new Worker(path.join(__dir, 'executor.js'), {
     workerData: { SAB },
-    resourceLimits: { maxOldGenerationSizeMb: 120 },
+    resourceLimits: { maxOldGenerationSizeMb: 150 },
   })
 
   execWorker.on('message', msg => {
@@ -125,22 +122,38 @@ function startWorkers() {
   })
 
   execWorker.on('error', e => {
-    console.log(`[EXECUTOR] ${e.message?.slice(0, 60)}`)
+    console.log(`[EXECUTOR] Worker error: ${e.message?.slice(0, 60)}`)
   })
+
+  execWorker.on('exit', code => {
+    if (code !== 0) {
+      console.log(`[EXECUTOR] Worker exited ${code} — restarting in 10s`)
+      setTimeout(() => {
+        execWorker = null
+        startWorkers()
+      }, 10_000)
+    }
+  })
+
+  // Mempool starts 3s after workers — not simultaneously
+  setTimeout(() => {
+    const mempoolWorker = new Worker(path.join(__dir, 'mempool.js'), {
+      workerData: { SAB },
+      resourceLimits: { maxOldGenerationSizeMb: 60 },
+    })
+    mempoolWorker.on('message', msg => {
+      if (msg?.type === 'swap') {
+        HOT[H.NATURAL_TODAY] = (HOT[H.NATURAL_TODAY] || 0) + 1
+      }
+    })
+    mempoolWorker.on('error', () => {})
+    console.log('[MEMPOOL] Scanner active — targeting Uniswap V3 swaps')
+  }, 3_000)
 }
 
-// ── MEMPOOL — starts after workers ───────────────────────────────────────────
-function startMempoolDelayed() {
-  startMempool(HOT)
-}
-
-// ── DEPLOYER — passes onWorkersReady callback ─────────────────────────────────
-// Deployer forks compiler (250MB subprocess).
-// When compiler exits, deployer calls onWorkersReady.
-// Only then do workers and mempool start.
+// ── DEPLOYER — workers start only after compiler exits ────────────────────────
 startDeployer(SAB, () => {
   startWorkers()
-  setTimeout(startMempoolDelayed, 2_000)
   console.log(`[SENTINEL] Operational :${PORT} | Send 0.1 POL to ${EXECUTOR.slice(0, 20)}... to deploy`)
 })
 
