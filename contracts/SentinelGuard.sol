@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-// SentinelGuard — On-chain 7-point check enforcement
-// Records check results for every cycle
-// Provides audit trail of pass/skip decisions
-
 interface IChainlink {
     function latestRoundData() external view returns (
         uint80, int256, uint256, uint256, uint80
@@ -39,18 +35,18 @@ contract SentinelGuard {
     uint256 public totalPass;
     uint256 public totalSkip;
 
-    // Chainlink feeds
-    address constant ETH_USD  = 0xF9680D99D6C9589e2a93a78A04A279e509205945;
-    address constant MATIC_USD = 0xAB594600376Ec9fD91F8e885dADF0CE036862dE;
+    // Chainlink feeds — Polygon — all verified checksums, all 40 hex digits
+    address constant ETH_USD   = 0xF9680D99D6C9589e2a93a78A04A279e509205945;
+    address constant MATIC_USD = 0xAB594600376Ec9fD91F8e885dADF0CE036862dE0;
 
-    // Balancer + Aave
+    // Balancer + Aave — Polygon
     address constant BALANCER  = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
     address constant AAVE_POOL = 0x794a61358D6845594F94dc1DB02A252b5b4814aD;
     address constant USDC      = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174;
     address constant A_USDC    = 0x625E7708f30cA75bfd92586e17077590C60eb4cD;
 
     uint256 constant MAX_ORACLE_AGE = 300;
-    uint256 constant MIN_FLASH      = 1_000_000e6;  // $1M USDC minimum
+    uint256 constant MIN_FLASH      = 1_000_000e6;
 
     event CheckRecorded(uint256 indexed cycleId, bool allPass, uint256 flashAvailable);
 
@@ -77,18 +73,18 @@ contract SentinelGuard {
     ) external onlyAuth {
         bool allPass = c1 && c2 && c3 && c4 && c5 && c6 && c7;
         results[cycleId] = CheckResult({
-            check1_flash:   c1,
-            check2_gas:     c2,
-            check3_spread:  c3,
-            check4_oracle:  c4,
-            check5_depth:   c5,
-            check6_treasury:c6,
-            check7_capacity:c7,
-            allPass:        allPass,
-            flashAvailable: flashAvailable,
-            gasCostUSD:     gasCostUSD,
-            expectedProfit: expectedProfit,
-            timestamp:      block.timestamp
+            check1_flash:    c1,
+            check2_gas:      c2,
+            check3_spread:   c3,
+            check4_oracle:   c4,
+            check5_depth:    c5,
+            check6_treasury: c6,
+            check7_capacity: c7,
+            allPass:         allPass,
+            flashAvailable:  flashAvailable,
+            gasCostUSD:      gasCostUSD,
+            expectedProfit:  expectedProfit,
+            timestamp:       block.timestamp
         });
         totalChecks++;
         if (allPass) totalPass++;
@@ -96,18 +92,14 @@ contract SentinelGuard {
         emit CheckRecorded(cycleId, allPass, flashAvailable);
     }
 
-    // Read live flash available from Balancer
     function liveBalancerFlash() external view returns (uint256) {
         return IERC20(USDC).balanceOf(BALANCER);
     }
 
-    // Read live Aave available
     function liveAaveFlash() external view returns (uint256) {
-        uint256 aUSDC = IERC20(A_USDC).balanceOf(AAVE_POOL);
-        return aUSDC;
+        return IERC20(A_USDC).balanceOf(AAVE_POOL);
     }
 
-    // Oracle freshness check
     function oracleFresh() external view returns (bool) {
         (, , , uint256 updatedAt,) = IChainlink(ETH_USD).latestRoundData();
         return block.timestamp - updatedAt <= MAX_ORACLE_AGE;
