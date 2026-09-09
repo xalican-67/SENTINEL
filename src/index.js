@@ -1,4 +1,6 @@
 // src/index.js — SENTINEL boot
+// Workers start ONLY after compiler subprocess fully exits
+// Memory: main 300MB | chains worker 120MB | executor worker 120MB
 
 import { Worker }        from 'worker_threads'
 import { fileURLToPath } from 'url'
@@ -20,17 +22,17 @@ import { startDashboard }  from './dashboard.js'
 export const SAB = new SharedArrayBuffer(SAB_SIZE)
 export const HOT = new Float64Array(SAB)
 
-// Boot defaults — P10 active
-HOT[H.GAS_OK]       = 1
-HOT[H.PROPELLER]    = 10
-HOT[H.DAILY_TARGET] = PROPELLER.P10.target
-HOT[H.CYCLES_MAX]   = PROPELLER.P10.maxCycles
+// Boot defaults
+HOT[H.GAS_OK]          = 1
+HOT[H.PROPELLER]       = 10
+HOT[H.DAILY_TARGET]    = PROPELLER.P10.target
+HOT[H.CYCLES_MAX]      = PROPELLER.P10.maxCycles
 HOT[H.RECONCILE_SCORE] = 100
 
 console.log('╔════════════════════════════════════════════════════════════╗')
 console.log('║                  S E N T I N E L                          ║')
 console.log(`║   Version: ${VERSION}  |  20 chains  |  1,526,682 blocks/day    ║`)
-console.log(`║   Executor: ${EXECUTOR.slice(0,20)}...                 ║`)
+console.log(`║   Executor: ${EXECUTOR.slice(0, 20)}...                 ║`)
 console.log('║   Treasury: 0xCCCF1C9A2154... (classified)                ║')
 console.log('║   Engine:   MEV + Swaps + Block cadence                   ║')
 console.log('║   Algorithm: 7-point live check — every cycle             ║')
@@ -39,46 +41,17 @@ console.log('╚═════════════════════�
 
 const __dir = path.dirname(fileURLToPath(import.meta.url))
 
-// Core services
-startDeployer(SAB)
+// ── LIGHTWEIGHT SERVICES — start immediately, minimal memory ──────────────────
+// These are cheap — no WS connections, no workers, no solc
 startTreasury(HOT)
 startOracle(HOT)
 startGas(HOT)
 startRecycler(HOT)
 startReconciler(HOT)
-startMempool(HOT)
 startDiag(SAB)
 startDashboard(SAB)
 
-// Chains worker — 20 WS connections, block + swap detection
-const chainsWorker = new Worker(path.join(__dir, 'chains.js'), {
-  workerData: { SAB },
-  resourceLimits: { maxOldGenerationSizeMb: 150 },
-})
-chainsWorker.on('message', msg => {
-  if (msg.type === 'block') {
-    execWorker.postMessage({ type: 'block' })
-  }
-})
-chainsWorker.on('error', e => console.log(`[CHAINS] ${e.message?.slice(0,60)}`))
-
-// Executor worker
-const execWorker = new Worker(path.join(__dir, 'executor.js'), {
-  workerData: { SAB },
-  resourceLimits: { maxOldGenerationSizeMb: 150 },
-})
-execWorker.on('message', msg => {
-  if (msg.type === 'cycle') {
-    HOT[H.REV_TODAY]   = (HOT[H.REV_TODAY]   || 0) + (msg.profit || 0)
-    HOT[H.CYCLES_TODAY]= (HOT[H.CYCLES_TODAY] || 0) + 1
-  }
-  if (msg.type === 'skip') {
-    HOT[H.SKIP_TODAY]  = (HOT[H.SKIP_TODAY]   || 0) + 1
-  }
-})
-execWorker.on('error', e => console.log(`[EXECUTOR] ${e.message?.slice(0,60)}`))
-
-// Uptime + memory
+// Uptime + memory tracker
 setInterval(() => {
   HOT[H.UPTIME]++
   HOT[H.MB] = process.memoryUsage().heapUsed / 1024 / 1024 | 0
@@ -87,7 +60,8 @@ setInterval(() => {
 // Midnight reset
 const scheduleMidnight = () => {
   const nx = new Date()
-  nx.setUTCHours(0,0,0,0); nx.setUTCDate(nx.getUTCDate() + 1)
+  nx.setUTCHours(0, 0, 0, 0)
+  nx.setUTCDate(nx.getUTCDate() + 1)
   setTimeout(() => {
     ;[
       H.CYCLES_TODAY, H.REV_TODAY, H.NET_TODAY, H.SKIP_TODAY,
@@ -101,8 +75,75 @@ const scheduleMidnight = () => {
 }
 scheduleMidnight()
 
-process.on('uncaughtException',  e => console.log(`[SENTINEL] ${e.message?.slice(0,100)}`))
-process.on('unhandledRejection', r => console.log(`[SENTINEL] ${String(r).slice(0,100)}`))
-process.on('SIGTERM', () => process.exit(0))
+// ── WORKER REFERENCES ─────────────────────────────────────────────────────────
+let chainsWorker = null
+let execWorker   = null
 
-console.log(`[SENTINEL] Operational :${PORT} | Send 0.1 POL to ${EXECUTOR.slice(0,20)}... to deploy`)
+// ── START WORKERS — called ONLY after compiler subprocess exits ───────────────
+// This is the critical fix: compiler holds 250MB while running.
+// Workers must not start until compiler has fully exited and freed memory.
+function startWorkers() {
+  console.log('[SENTINEL] Starting workers — compiler memory fully released')
+
+  // Chains worker — 20 WebSocket connections
+  chainsWorker = new Worker(path.join(__dir, 'chains.js'), {
+    workerData: { SAB },
+    resourceLimits: { maxOldGenerationSizeMb: 120 },
+  })
+
+  chainsWorker.on('message', msg => {
+    if (msg?.type === 'block' && execWorker) {
+      execWorker.postMessage({ type: 'block', chain: msg.chain })
+    }
+  })
+
+  chainsWorker.on('error', e => {
+    console.log(`[CHAINS] ${e.message?.slice(0, 60)}`)
+  })
+
+  chainsWorker.on('exit', code => {
+    if (code !== 0) {
+      console.log(`[CHAINS] Worker exited ${code} — restarting in 5s`)
+      setTimeout(startWorkers, 5_000)
+    }
+  })
+
+  // Executor worker
+  execWorker = new Worker(path.join(__dir, 'executor.js'), {
+    workerData: { SAB },
+    resourceLimits: { maxOldGenerationSizeMb: 120 },
+  })
+
+  execWorker.on('message', msg => {
+    if (msg?.type === 'cycle') {
+      HOT[H.REV_TODAY]    = (HOT[H.REV_TODAY]    || 0) + (msg.profit || 0)
+      HOT[H.CYCLES_TODAY] = (HOT[H.CYCLES_TODAY]  || 0) + 1
+    }
+    if (msg?.type === 'skip') {
+      HOT[H.SKIP_TODAY] = (HOT[H.SKIP_TODAY] || 0) + 1
+    }
+  })
+
+  execWorker.on('error', e => {
+    console.log(`[EXECUTOR] ${e.message?.slice(0, 60)}`)
+  })
+}
+
+// ── MEMPOOL — starts after workers ───────────────────────────────────────────
+function startMempoolDelayed() {
+  startMempool(HOT)
+}
+
+// ── DEPLOYER — passes onWorkersReady callback ─────────────────────────────────
+// Deployer forks compiler (250MB subprocess).
+// When compiler exits, deployer calls onWorkersReady.
+// Only then do workers and mempool start.
+startDeployer(SAB, () => {
+  startWorkers()
+  setTimeout(startMempoolDelayed, 2_000)
+  console.log(`[SENTINEL] Operational :${PORT} | Send 0.1 POL to ${EXECUTOR.slice(0, 20)}... to deploy`)
+})
+
+process.on('uncaughtException',  e => console.log(`[SENTINEL] ${e.message?.slice(0, 100)}`))
+process.on('unhandledRejection', r => console.log(`[SENTINEL] ${String(r).slice(0, 100)}`))
+process.on('SIGTERM', () => process.exit(0))
