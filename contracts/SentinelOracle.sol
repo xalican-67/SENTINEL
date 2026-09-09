@@ -15,9 +15,10 @@ contract SentinelOracle {
     address public immutable owner;
     address public           sentinel;
 
+    // Chainlink feeds — Polygon — all verified checksums, all 40 hex digits
     address constant ETH_USD   = 0xF9680D99D6C9589e2a93a78A04A279e509205945;
-    address constant BTC_USD   = 0xc907E116054Ad103354f2D350FD2514433D57F6F;
-    address constant MATIC_USD = 0xAB594600376Ec9fD91F8e885dADF0CE036862dE;
+    address constant BTC_USD   = 0xc907E116054Ad103354f2D350FD2514433D57F6f;
+    address constant MATIC_USD = 0xAB594600376Ec9fD91F8e885dADF0CE036862dE0;
     address constant USDC_USD  = 0xfE4A8cc5b5B2366C1B58Bea3858e81843581b2F7;
 
     uint256 constant MAX_AGE = 300;
@@ -31,6 +32,7 @@ contract SentinelOracle {
     modifier onlyOwner() { require(msg.sender == owner, "ORA:!owner"); _; }
 
     constructor() { owner = msg.sender; }
+
     function setSentinel(address _sentinel) external onlyOwner { sentinel = _sentinel; }
 
     function getPrice(address feed) public view returns (Price memory) {
@@ -44,8 +46,8 @@ contract SentinelOracle {
 
     function allPricesFresh() external view returns (bool) {
         return
-            getPrice(ETH_USD).fresh &&
-            getPrice(BTC_USD).fresh &&
+            getPrice(ETH_USD).fresh   &&
+            getPrice(BTC_USD).fresh   &&
             getPrice(MATIC_USD).fresh &&
             getPrice(USDC_USD).fresh;
     }
