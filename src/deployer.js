@@ -2,6 +2,7 @@
 // Compiler runs in isolated subprocess — 250MB hard cap
 // Sequential compilation — one contract at a time
 // Main process never loads solc — stays clean
+// onWorkersReady called ONLY after compiler subprocess fully exits
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs'
 import { fork }          from 'child_process'
@@ -67,7 +68,7 @@ function inject(addrs) {
 // ── FORK COMPILER — 250MB isolated subprocess ─────────────────────────────────
 function runCompiler() {
   return new Promise((resolve, reject) => {
-    console.log('[DEPLOYER] Forking compiler (250MB isolated)...')
+    console.log('[DEPLOYER] Forking compiler (250MB isolated — workers held back)...')
 
     const child = fork(
       path.join(__dir, 'compile.js'),
@@ -106,7 +107,7 @@ function runCompiler() {
           console.log(`[DEPLOYER] Artifacts written (${msg.count}) — compiler exiting`)
           break
         case 'already_deployed':
-          console.log('[DEPLOYER] Existing deployment found — skipping compile')
+          console.log('[DEPLOYER] Existing deployment — skipping compile')
           resolve({ alreadyDeployed: true, data: msg.data })
           break
         case 'fatal':
@@ -189,43 +190,41 @@ async function deployAll(compiled, HOT) {
   }
 
   // Link companions
-  if (sentinelAddr) {
-    try {
-      const s   = makeSigner()
-      const c   = new ethers.Contract(
-        sentinelAddr,
-        ['function setCompanions(address,address,address,address) external'],
-        s
-      )
-      const fee = await makeProvider().getFeeData()
-      await (await c.setCompanions(
-        addrs.SentinelVault  || ethers.ZeroAddress,
-        addrs.SentinelGuard  || ethers.ZeroAddress,
-        addrs.SentinelOracle || ethers.ZeroAddress,
-        addrs.SentinelSignal || ethers.ZeroAddress,
-        { gasLimit: 200_000, gasPrice: fee.gasPrice }
-      )).wait(1)
-      console.log('[DEPLOYER] Companions linked')
-    } catch (e) { console.log(`[DEPLOYER] Link: ${e.message?.slice(0, 60)}`) }
-  }
+  try {
+    const s = makeSigner()
+    const c = new ethers.Contract(
+      sentinelAddr,
+      ['function setCompanions(address,address,address,address) external'],
+      s
+    )
+    const fee = await makeProvider().getFeeData()
+    await (await c.setCompanions(
+      addrs.SentinelVault  || ethers.ZeroAddress,
+      addrs.SentinelGuard  || ethers.ZeroAddress,
+      addrs.SentinelOracle || ethers.ZeroAddress,
+      addrs.SentinelSignal || ethers.ZeroAddress,
+      { gasLimit: 200_000, gasPrice: fee.gasPrice }
+    )).wait(1)
+    console.log('[DEPLOYER] Companions linked')
+  } catch (e) { console.log(`[DEPLOYER] Link: ${e.message?.slice(0, 60)}`) }
 
   // Set sentinel on vault
   if (addrs.SentinelVault) {
     try {
-      const s   = makeSigner()
-      const v   = new ethers.Contract(addrs.SentinelVault, ['function setSentinel(address) external'], s)
-      const fee = await makeProvider().getFeeData()
-      await (await v.setSentinel(sentinelAddr, { gasLimit: 100_000, gasPrice: fee.gasPrice })).wait(1)
+      const s = makeSigner()
+      const v = new ethers.Contract(addrs.SentinelVault, ['function setSentinel(address) external'], s)
+      const f = await makeProvider().getFeeData()
+      await (await v.setSentinel(sentinelAddr, { gasLimit: 100_000, gasPrice: f.gasPrice })).wait(1)
     } catch {}
   }
 
   // Set sentinel on guard
   if (addrs.SentinelGuard) {
     try {
-      const s   = makeSigner()
-      const g   = new ethers.Contract(addrs.SentinelGuard, ['function setSentinel(address) external'], s)
-      const fee = await makeProvider().getFeeData()
-      await (await g.setSentinel(sentinelAddr, { gasLimit: 100_000, gasPrice: fee.gasPrice })).wait(1)
+      const s = makeSigner()
+      const g = new ethers.Contract(addrs.SentinelGuard, ['function setSentinel(address) external'], s)
+      const f = await makeProvider().getFeeData()
+      await (await g.setSentinel(sentinelAddr, { gasLimit: 100_000, gasPrice: f.gasPrice })).wait(1)
     } catch {}
   }
 
@@ -272,10 +271,11 @@ function watchForFunds(compiled, HOT) {
   console.log(`[DEPLOYER] Watching for 0.1 POL at ${EXECUTOR}`)
 }
 
-// ── ENTRY ─────────────────────────────────────────────────────────────────────
-export function startDeployer(SAB) {
+// ── ENTRY — onWorkersReady called ONLY after compiler exits ───────────────────
+export function startDeployer(SAB, onWorkersReady) {
   const HOT = new Float64Array(SAB)
 
+  // Existing deployment — no compile needed, start workers immediately
   const existing = loadAddresses()
   if (existing) {
     inject(existing)
@@ -283,10 +283,11 @@ export function startDeployer(SAB) {
     HOT[H.CONTRACTS]  = count
     HOT[H.DEPLOYMENT] = 1
     console.log(`[DEPLOYER] Restored ${count} contracts | Sentinel: ${existing.Sentinel?.slice(0, 14)}...`)
+    onWorkersReady?.()
     return
   }
 
-  console.log('[DEPLOYER] No existing deployment — forking compiler...')
+  console.log('[DEPLOYER] No existing deployment — workers held until compiler exits')
 
   setTimeout(async () => {
     let attempts = 0
@@ -294,20 +295,31 @@ export function startDeployer(SAB) {
       attempts++
       try {
         const result = await runCompiler()
+
         if (result.alreadyDeployed) {
           inject(result.data)
           const count = Object.values(result.data).filter(v => typeof v === 'string' && ethers.isAddress(v)).length
           HOT[H.CONTRACTS]  = count
           HOT[H.DEPLOYMENT] = 1
+          // Compiler exited — safe to start workers
+          onWorkersReady?.()
           return
         }
+
         if (result.compiled) {
+          // Compiler exited cleanly — start workers now, watch for POL in background
+          console.log('[DEPLOYER] Compiler exited cleanly — starting workers')
+          onWorkersReady?.()
           watchForFunds(result.compiled, HOT)
         }
       } catch (e) {
         console.log(`[DEPLOYER] Compile attempt ${attempts}/5: ${e.message?.slice(0, 80)}`)
-        if (attempts < 5) setTimeout(tryCompile, 30_000)
-        else console.log('[DEPLOYER] Compilation failed after 5 attempts')
+        if (attempts < 5) {
+          setTimeout(tryCompile, 30_000)
+        } else {
+          console.log('[DEPLOYER] Compilation failed after 5 attempts — starting workers anyway')
+          onWorkersReady?.()
+        }
       }
     }
     tryCompile()
