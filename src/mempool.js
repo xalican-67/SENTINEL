@@ -1,9 +1,12 @@
-// src/mempool.js — SENTINEL mempool scanner
-// Detects pending transactions for MEV targeting
-// Feeds opportunity queue to executor
+// src/mempool.js — SENTINEL mempool scanner (Worker)
+// Runs as isolated worker thread — 60MB cap
+// Detects qualifying pending swaps for MEV targeting
 
-import { ethers } from 'ethers'
-import { PRIMARY_CHAIN, H } from './config.js'
+import { workerData, parentPort } from 'worker_threads'
+import { ethers }                 from 'ethers'
+import { PRIMARY_CHAIN }          from './config.js'
+
+const SAB = workerData.SAB
 
 function makeProvider() {
   const c = PRIMARY_CHAIN
@@ -12,45 +15,26 @@ function makeProvider() {
 }
 
 const provider = makeProvider()
+const UNISWAP_ROUTER = '0xE592427A0AEce92De3Edee1F18E0157C05861564'
+const SWAP_SELECTOR  = '0x414bf389'
+const MIN_VALUE_ETH  = 0.1
 
-const UNISWAP_ROUTER   = '0xE592427A0AEce92De3Edee1F18E0157C05861564'
-const SWAP_SELECTOR    = '0x414bf389'  // exactInputSingle
-const MIN_VALUE_USD    = 100_000       // $100K minimum for MEV targeting
-
-export async function scanMempool(HOT) {
+async function scan() {
   try {
     const pending = await provider.send('txpool_content', [])
-    if (!pending?.pending) return []
-
-    const opportunities = []
+    if (!pending?.pending) return
     for (const [, txs] of Object.entries(pending.pending)) {
       for (const [, tx] of Object.entries(txs)) {
         if (
           tx.to?.toLowerCase() === UNISWAP_ROUTER.toLowerCase() &&
-          tx.input?.startsWith(SWAP_SELECTOR)
+          tx.input?.startsWith(SWAP_SELECTOR) &&
+          Number(tx.value || 0) / 1e18 >= MIN_VALUE_ETH
         ) {
-          const value = Number(tx.value || 0) / 1e18
-          if (value >= 0.1) { // 0.1 ETH minimum
-            opportunities.push({
-              hash:     tx.hash,
-              from:     tx.from,
-              value,
-              gasPrice: Number(tx.gasPrice || 0) / 1e9,
-            })
-          }
+          parentPort?.postMessage({ type: 'swap', hash: tx.hash })
         }
       }
     }
-    return opportunities
-  } catch { return [] }
+  } catch {}
 }
 
-export function startMempool(HOT) {
-  setInterval(async () => {
-    const opps = await scanMempool(HOT)
-    if (opps.length > 0) {
-      HOT[H.NATURAL_TODAY] = (HOT[H.NATURAL_TODAY] || 0) + opps.length
-    }
-  }, 1_000)
-  console.log('[MEMPOOL] Scanner active — targeting Uniswap V3 swaps')
-}
+setInterval(scan, 1_000)
