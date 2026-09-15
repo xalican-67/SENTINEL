@@ -1,21 +1,32 @@
-// src/executor.js — SENTINEL executor (Worker)
-// Strategy parameters derived from live check results — no hardcoded values
-// 7-point check runs before every cycle via livecheck.js
-// Nonce mutex — no double-spend
+// src/executor.js — SENTINEL executor (Worker thread)
+// All imports aligned exactly to Sentinel config.js exports
+// Live pool state, live spread, nonce mutex
 // 1ms block cadence ring
+// $100 gas reserve check
 
 import { workerData, parentPort } from 'worker_threads'
 import { ethers }                 from 'ethers'
 import {
-  EXECUTOR_PK, EXECUTOR,
-  CONTRACT, H, PRIMARY_CHAIN,
-  GAS_CAP_GWEI, GAS_LIMIT,
-  USDC_POLYGON, WETH_POLYGON, UNI_POOLS,
+  EXECUTOR_PK,
+  EXECUTOR,
+  TREASURY,
+  CONTRACT,
+  H,
+  PRIMARY_CHAIN,
+  USDC_POLYGON,
+  WETH_POLYGON,
+  UNI_POOLS,
 } from './config.js'
-import { runAllChecks } from './livecheck.js'
+import { runAllChecks, clearLivecheckCache } from './livecheck.js'
 
 const SAB = workerData.SAB
 const HOT = new Float64Array(SAB)
+
+// Gas constants — defined here, not imported (Sentinel config uses numbers not BigInt)
+const GAS_CAP_GWEI   = 1000        // number
+const GAS_CAP_WEI    = 1000n * BigInt(1e9)
+const GAS_LIMIT      = 3_500_000n
+const GAS_RESERVE_USD = 100
 
 function makeProvider() {
   const c = PRIMARY_CHAIN
@@ -54,6 +65,37 @@ async function drainNonce() {
   }
 }
 
+// ── GAS RESERVE CHECK — $100 minimum ─────────────────────────────────────────
+let maticPriceCache  = 0.8
+let lastReserveCheck = 0
+
+async function checkGasReserve() {
+  const now = Date.now()
+  if (now - lastReserveCheck < 60_000) return HOT[H.RESERVE_OK] === 1
+  lastReserveCheck = now
+  try {
+    const bal    = await makeProvider().getBalance(EXECUTOR)
+    const pol    = parseFloat(ethers.formatEther(bal))
+    const usdVal = pol * maticPriceCache
+    HOT[H.GAS_RESERVE] = usdVal
+    if (usdVal < GAS_RESERVE_USD) {
+      if (HOT[H.RESERVE_OK] !== 0) {
+        console.log(`[EXECUTOR] Gas reserve LOW — $${usdVal.toFixed(2)} < $${GAS_RESERVE_USD}`)
+        console.log(`[EXECUTOR] Top up ${EXECUTOR} with POL to resume`)
+      }
+      HOT[H.RESERVE_OK] = 0
+      return false
+    }
+    if (HOT[H.RESERVE_OK] === 0) {
+      console.log(`[EXECUTOR] Gas reserve restored — $${usdVal.toFixed(2)} — resuming`)
+    }
+    HOT[H.RESERVE_OK] = 1
+    return true
+  } catch {
+    return HOT[H.RESERVE_OK] === 1
+  }
+}
+
 // ── LIVE POOL STATE ───────────────────────────────────────────────────────────
 const POOL_ABI = [
   'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, uint8, bool)',
@@ -63,13 +105,16 @@ const ERC20_ABI = ['function balanceOf(address) view returns (uint256)']
 
 async function getLivePoolState(poolAddr, provider) {
   try {
-    const pool        = new ethers.Contract(poolAddr, POOL_ABI, provider)
+    const pool = new ethers.Contract(poolAddr, POOL_ABI, provider)
     const [slot0, liq] = await Promise.all([pool.slot0(), pool.liquidity()])
-    const tick        = Number(slot0.tick)
-    const spacing     = 10
-    const tickLower   = Math.floor(tick / spacing) * spacing - spacing * 2
-    const tickUpper   = Math.ceil(tick  / spacing) * spacing + spacing * 2
-    return { tick, tickLower, tickUpper, liquidity: BigInt(liq) }
+    const tick    = Number(slot0.tick)
+    const spacing = 10
+    return {
+      tick,
+      tickLower: Math.floor(tick / spacing) * spacing - spacing * 2,
+      tickUpper: Math.ceil(tick  / spacing) * spacing + spacing * 2,
+      liquidity: BigInt(liq),
+    }
   } catch { return null }
 }
 
@@ -77,7 +122,7 @@ async function getLiveSpread(pool1, pool2, provider) {
   try {
     const p1 = new ethers.Contract(pool1, POOL_ABI, provider)
     const p2 = new ethers.Contract(pool2, POOL_ABI, provider)
-    const [s1, s2]   = await Promise.all([p1.slot0(), p2.slot0()])
+    const [s1, s2] = await Promise.all([p1.slot0(), p2.slot0()])
     const price1 = (Number(s1.sqrtPriceX96) ** 2) / (2 ** 192) * 1e12
     const price2 = (Number(s2.sqrtPriceX96) ** 2) / (2 ** 192) * 1e12
     const spread = Math.abs(price1 - price2) / Math.min(price1, price2)
@@ -122,11 +167,11 @@ async function buildStrategy(cycleId, flashAmount, provider) {
 
   if (strat === 2) {
     // SANDWICH — pool depth gate
-    const state      = await getLivePoolState(UNI_POOLS.USDC_WETH_005, provider)
+    const state     = await getLivePoolState(UNI_POOLS.USDC_WETH_005, provider)
     if (!state) return null
-    const poolDepth  = HOT[H.FLASH_BAL] || 0
+    const poolDepth = HOT[H.FLASH_BALANCER] || 0
     if (poolDepth < flashAmount * 2) return null
-    const frontAmt   = flashBN * 30n / 100n
+    const frontAmt  = flashBN * 30n / 100n
     const data = ethers.AbiCoder.defaultAbiCoder().encode(
       ['address', 'bool', 'uint256', 'uint256'],
       [UNI_POOLS.USDC_WETH_005, true, frontAmt, minProfitUSDC]
@@ -145,7 +190,12 @@ let cycleId = 0
 async function executeCycle() {
   if (!CONTRACT.SENTINEL)            return
   if (HOT[H.GAS_OK] === 0)          return
+  if (HOT[H.RESERVE_OK] === 0)      return
   if (activeExecs >= MAX_CONCURRENT) return
+
+  const cycles = HOT[H.CYCLES_TODAY] || 0
+  const maxCyc = HOT[H.CYCLES_MAX]   || MAX_CYCLES_TODAY || 1_526_682
+  if (cycles >= maxCyc)              return
 
   activeExecs++
   cycleId++
@@ -153,11 +203,26 @@ async function executeCycle() {
   const t0     = Date.now()
 
   try {
+    // Gas reserve check — cached 60s
+    const reserveOK = await checkGasReserve()
+    if (!reserveOK) {
+      HOT[H.SKIP_TODAY] = (HOT[H.SKIP_TODAY] || 0) + 1
+      parentPort?.postMessage({ type: 'skip', cycleId: thisId, reason: 'gas reserve < $100' })
+      return
+    }
+
+    // 7-point live check
     const check = await runAllChecks(HOT)
+
+    HOT[H.FLASH_LIVE]     = check.flashToUse  || 0
+    HOT[H.FLASH_BALANCER] = check.flashBal    || 0
+    HOT[H.FLASH_AAVE]     = check.flashAave   || 0
+    HOT[H.GAS_PRICE]      = check.gasGwei     || 0
+    maticPriceCache       = check.maticPrice  || 0.8
 
     if (!check.go) {
       HOT[H.SKIP_TODAY] = (HOT[H.SKIP_TODAY] || 0) + 1
-      parentPort?.postMessage({ type: 'skip', cycleId: thisId, reason: check.reason })
+      parentPort?.postMessage({ type: 'skip', cycleId: thisId, reason: check.reason, failed: check.failed })
       return
     }
 
@@ -167,7 +232,7 @@ async function executeCycle() {
 
     if (!strat) {
       HOT[H.SKIP_TODAY] = (HOT[H.SKIP_TODAY] || 0) + 1
-      parentPort?.postMessage({ type: 'skip', cycleId: thisId, reason: 'no viable strategy' })
+      parentPort?.postMessage({ type: 'skip', cycleId: thisId, reason: 'no viable strategy from live data' })
       return
     }
 
@@ -180,43 +245,53 @@ async function executeCycle() {
       )
       const fee      = await p.getFeeData()
       const rawGas   = fee.gasPrice || ethers.parseUnits('30', 'gwei')
-      const capGas   = GAS_CAP_GWEI * BigInt(1e9)
-      const gasPrice = (rawGas > capGas ? capGas : rawGas) * 130n / 100n
+      const gasPrice = (rawGas > GAS_CAP_WEI ? GAS_CAP_WEI : rawGas) * 130n / 100n
       return (await sentinel.execute(
         strat.tokens, strat.amounts, strat.strategy, strat.data, BigInt(thisId),
         { gasLimit: GAS_LIMIT, gasPrice, nonce }
       )).wait(1)
     })
 
-    HOT[H.EXEC_SPEED] = Date.now() - t0
+    HOT[H.EXEC_SPEED_MS] = Date.now() - t0
 
     if (receipt?.status === 1) {
-      // Read actual profit — treasury balance delta
-      const usdc     = new ethers.Contract(USDC_POLYGON, ERC20_ABI, provider)
-      const tBal     = Number(await usdc.balanceOf(TREASURY)) / 1e6
-      const prev     = HOT[H.TREASURY_BAL] || 0
-      const profit   = Math.max(0, tBal - prev)
+      // Read actual profit from treasury balance delta
+      const usdc   = new ethers.Contract(USDC_POLYGON, ERC20_ABI, makeProvider())
+      const tBal   = Number(await usdc.balanceOf(TREASURY)) / 1e6
+      const prev   = HOT[H.VAULT_CONFIRMED] || 0
+      const profit = Math.max(0, tBal - prev)
 
-      HOT[H.TREASURY_BAL]  = tBal
-      HOT[H.CYCLES_TODAY]  = (HOT[H.CYCLES_TODAY]  || 0) + 1
-      HOT[H.CYCLES_TOTAL]  = (HOT[H.CYCLES_TOTAL]  || 0) + 1
-      HOT[H.SUCCESS_TODAY] = (HOT[H.SUCCESS_TODAY]  || 0) + 1
-      HOT[H.REV_TODAY]     = (HOT[H.REV_TODAY]      || 0) + profit
-      HOT[H.REV_TOTAL]     = (HOT[H.REV_TOTAL]      || 0) + profit
-      HOT[H.COMPUTED_BAL]  = (HOT[H.COMPUTED_BAL]   || 0) + profit
+      HOT[H.VAULT_CONFIRMED] = tBal
+      HOT[H.CYCLES_TODAY]    = (HOT[H.CYCLES_TODAY]    || 0) + 1
+      HOT[H.CYCLES_TOTAL]    = (HOT[H.CYCLES_TOTAL]    || 0) + 1
+      HOT[H.SUCCESS_TODAY]   = (HOT[H.SUCCESS_TODAY]   || 0) + 1
+      HOT[H.REV_TODAY]       = (HOT[H.REV_TODAY]       || 0) + profit
+      HOT[H.REV_TOTAL]       = (HOT[H.REV_TOTAL]       || 0) + profit
+      HOT[H.VAULT_COMPUTED]  = (HOT[H.VAULT_COMPUTED]  || 0) + profit
 
       const gasCost = Number(GAS_LIMIT * (receipt.gasPrice || 0n)) / 1e18
       HOT[H.GAS_SPENT] = (HOT[H.GAS_SPENT] || 0) + gasCost
 
-      if (HOT[H.FIRST_REV] === 0 && profit > 0) HOT[H.FIRST_REV] = 1
+      if (strat.strategy === 1) HOT[H.MEV_JIT]       = (HOT[H.MEV_JIT]       || 0) + 1
+      else if (strat.strategy === 2) HOT[H.MEV_ARB]  = (HOT[H.MEV_ARB]       || 0) + 1
+      else if (strat.strategy === 3) HOT[H.MEV_SANDWICH] = (HOT[H.MEV_SANDWICH] || 0) + 1
+
+      if ((HOT[H.FIRST_REV] || 0) === 0 && profit > 0) HOT[H.FIRST_REV] = 1
+
+      clearLivecheckCache()
 
       parentPort?.postMessage({
-        type: 'cycle', cycleId: thisId, profit,
-        flash: flashAmount, strategy: strat.strategy,
-        stratName: strat.name, elapsed: Date.now() - t0, txHash: receipt.hash,
+        type:      'cycle',
+        cycleId:   thisId,
+        profit,
+        flash:     flashAmount,
+        strategy:  strat.strategy,
+        stratName: strat.name,
+        elapsed:   Date.now() - t0,
+        txHash:    receipt.hash,
       })
 
-      if (HOT[H.CYCLES_TODAY] % 10 === 0) {
+      if ((HOT[H.CYCLES_TODAY] || 0) % 10 === 0) {
         const rev = HOT[H.REV_TODAY] || 0
         const fmt = rev >= 1e6 ? `$${(rev/1e6).toFixed(3)}M` : `$${rev.toFixed(2)}`
         console.log(`[EXECUTOR] ${HOT[H.CYCLES_TODAY]} cycles | ${fmt} today | ${strat.name} $${profit.toFixed(2)} | ${Date.now()-t0}ms`)
@@ -246,7 +321,10 @@ parentPort?.on('message', msg => {
   if (msg?.type === 'block' || msg?.type === 'swap') blockQueue++
 })
 
-// Polygon fallback — fire every 2.12s if no block signal arrives
+// Polygon fallback — fire every 2.12s if no block signal
 setInterval(() => { blockQueue++ }, 2120)
 
-console.log('[EXECUTOR] 1ms ring | live pool state | live spread | nonce mutex | max 3 concurrent')
+// Reserve check every 60s
+setInterval(() => { checkGasReserve().catch(() => {}) }, 60_000)
+
+console.log(`[EXECUTOR] 1ms ring | 7-point live check | gas reserve $${GAS_RESERVE_USD} | live strategy data | max ${MAX_CONCURRENT} concurrent`)
