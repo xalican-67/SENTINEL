@@ -119,10 +119,10 @@ export const FLASHBOTS_RELAY   = 'https://polygon.flashbots.net'
 
 // Chainlink feeds — Polygon
 export const CHAINLINK = {
-  ETH_USD:  '0xF9680D99D6C9589e2a93a78A04A279e509205945',
-  BTC_USD:  '0xc907E116054Ad103354f2D350FD2514433D57F6F',
-  MATIC_USD:'0xAB594600376Ec9fD91F8e885dADF0CE036862dE',
-  USDC_USD: '0xfE4A8cc5b5B2366C1B58Bea3858e81843581b2F7',
+  ETH_USD:   '0xF9680D99D6C9589e2a93a78A04A279e509205945',
+  BTC_USD:   '0xc907E116054Ad103354f2D350FD2514433D57F6F',
+  MATIC_USD: '0xAB594600376Ec9fD91F8e885dADF0CE036862dE0',
+  USDC_USD:  '0xfE4A8cc5b5B2366C1B58Bea3858e81843581b2F7',
 }
 
 // Uniswap V3 pools — Polygon (for spread check)
@@ -175,13 +175,13 @@ export const DAILY_GAS_BUDGET  = 50           // max POL per day on gas
 
 // ── 7-POINT CHECK THRESHOLDS ─────────────────────────────────────────────────
 export const CHECK = {
-  MIN_FLASH_USD:      1_000_000,   // CHECK 1: skip if flash < $1M
-  MAX_GAS_PCT:        0.01,        // CHECK 2: skip if gas > 1% of profit
-  MIN_SPREAD_PCT:     0.05,        // CHECK 3: skip if spread < 0.05%
-  MAX_ORACLE_AGE_SEC: 300,         // CHECK 4: skip if price > 5 min old
-  MAX_SLIPPAGE_PCT:   0.5,         // CHECK 5: skip if slippage > 0.5%
-  RECONCILE_EVERY:    100,         // CHECK 6: reconcile every 100 cycles
-  MAX_DISCREPANCY:    5,           // CHECK 6: flag if > 5% gap
+  MIN_FLASH_USD:      1_000_000,
+  MAX_GAS_PCT:        0.01,
+  MIN_SPREAD_PCT:     0.05,
+  MAX_ORACLE_AGE_SEC: 300,
+  MAX_SLIPPAGE_PCT:   0.5,
+  RECONCILE_EVERY:    100,
+  MAX_DISCREPANCY:    5,
 }
 
 // ── CONTRACTS ─────────────────────────────────────────────────────────────────
