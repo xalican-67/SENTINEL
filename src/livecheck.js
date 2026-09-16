@@ -1,311 +1,246 @@
-// src/executor.js — SENTINEL executor (Worker thread)
-// All imports exact match to config.js exports
-// H.EXEC_SPEED (slot 12) — not H.EXEC_SPEED_MS
-// GAS_CAP_GWEI, GAS_MARKUP, GAS_LIMIT are BigInt in config — used as BigInt here
+// src/livecheck.js — SENTINEL live pre-execution check
+// algorithm.js style — all imports exact match to config.js exports
 
-import { workerData, parentPort } from 'worker_threads'
-import { ethers }                 from 'ethers'
+import { ethers } from 'ethers'
 import {
-  EXECUTOR_PK,
-  EXECUTOR,
-  TREASURY,
-  CONTRACT,
-  H,
   PRIMARY_CHAIN,
+  BALANCER_VAULT,
+  AAVE_POOL_POLYGON,
   USDC_POLYGON,
   WETH_POLYGON,
+  CHAINLINK,
   UNI_POOLS,
-  GAS_CAP_GWEI,
-  GAS_MARKUP,
-  GAS_LIMIT,
-  DAILY_GAS_BUDGET,
+  H,
+  TREASURY,
   MAX_CYCLES_TODAY,
-  FLASH_CONFIG,
+  DAILY_GAS_BUDGET,
   CHECK,
+  FLASH_CONFIG,
 } from './config.js'
-import { runAllChecks, clearLivecheckCache } from './livecheck.js'
 
-const SAB = workerData.SAB
-const HOT = new Float64Array(SAB)
+const ERC20_ABI  = ['function balanceOf(address) view returns (uint256)']
+const ORACLE_ABI = ['function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)']
+const POOL_ABI   = ['function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, uint8, bool)']
 
-const GAS_RESERVE_USD = 100
+const A_USDC = '0x625E7708f30cA75bfd92586e17077590C60eb4cD'
 
-function makeProvider() {
-  const c = PRIMARY_CHAIN
-  const n = new ethers.Network(c.name, c.id)
-  return new ethers.JsonRpcProvider(c.http, n, { staticNetwork: n })
+let _provider = null
+let _cache    = null
+let _cacheTs  = 0
+const CACHE_TTL = 5_000
+
+function getProvider() {
+  if (!_provider) {
+    const c = PRIMARY_CHAIN
+    const n = new ethers.Network(c.name, c.id)
+    _provider = new ethers.JsonRpcProvider(c.http, n, { staticNetwork: n })
+  }
+  return _provider
 }
 
-// ── NONCE MUTEX ───────────────────────────────────────────────────────────────
-let   nonceLocked  = false
-const nonceQueue   = []
-let   currentNonce = null
-
-async function withNonce(fn) {
-  return new Promise((resolve, reject) => {
-    nonceQueue.push({ fn, resolve, reject })
-    drainNonce()
-  })
-}
-
-async function drainNonce() {
-  if (nonceLocked || !nonceQueue.length) return
-  nonceLocked = true
-  const { fn, resolve, reject } = nonceQueue.shift()
+// CHECK 1 — Live flash capital
+async function check1_flash(p) {
   try {
-    if (currentNonce === null) {
-      currentNonce = await makeProvider().getTransactionCount(EXECUTOR, 'pending')
+    const usdc = new ethers.Contract(USDC_POLYGON, ERC20_ABI, p)
+    const [b, a] = await Promise.all([
+      usdc.balanceOf(BALANCER_VAULT),
+      usdc.balanceOf(A_USDC),
+    ])
+    const balancer = Number(b) / 1e6
+    const aave     = Number(a) / 1e6
+    const total    = balancer + aave
+    return {
+      pass:       total >= FLASH_CONFIG.min_profitable,
+      balancer,   aave, total,
+      flashToUse: total,
+      detail:     `Balancer $${(balancer/1e6).toFixed(2)}M | Aave $${(aave/1e6).toFixed(2)}M`,
     }
-    resolve(await fn(currentNonce, makeProvider()))
-    currentNonce++
   } catch (e) {
-    currentNonce = null
-    reject(e)
-  } finally {
-    nonceLocked = false
-    if (nonceQueue.length) drainNonce()
+    return { pass: false, balancer: 0, aave: 0, total: 0, flashToUse: 0,
+      detail: `flash read failed: ${e.message?.slice(0,50)}` }
   }
 }
 
-// ── GAS RESERVE — $100 minimum ────────────────────────────────────────────────
-let maticPriceCache  = 0.8
-let lastReserveCheck = 0
-
-async function checkGasReserve() {
-  const now = Date.now()
-  if (now - lastReserveCheck < 60_000) return true
-  lastReserveCheck = now
+// CHECK 2 — Gas cost vs expected profit
+async function check2_gas(p, flashToUse) {
   try {
-    const bal    = await makeProvider().getBalance(EXECUTOR)
-    const pol    = parseFloat(ethers.formatEther(bal))
-    const usdVal = pol * maticPriceCache
-    if (usdVal < GAS_RESERVE_USD) {
-      console.log(`[EXECUTOR] Gas reserve LOW — $${usdVal.toFixed(2)} < $${GAS_RESERVE_USD} | top up ${EXECUTOR}`)
-      return false
-    }
-    return true
-  } catch { return true }
+    const fee     = await p.getFeeData()
+    const gwei    = Number(fee.gasPrice || 0n) / 1e9
+    const matic   = await getMATICPrice(p)
+    const gasCost = gwei * 3_500_000 * 1e-9 * matic
+    const minProfit = flashToUse * FLASH_CONFIG.extraction_rate
+    const pass = gwei <= 1000 && gasCost < minProfit * CHECK.MAX_GAS_PCT
+    return { pass, gasGwei: gwei, gasCostUSD: gasCost, maticPrice: matic,
+      detail: `${gwei.toFixed(1)} gwei | gas $${gasCost.toFixed(2)}` }
+  } catch (e) {
+    return { pass: false, gasGwei: 0, gasCostUSD: 0, maticPrice: 0.8,
+      detail: `gas check failed` }
+  }
 }
 
-// ── LIVE POOL STATE ───────────────────────────────────────────────────────────
-const POOL_ABI = [
-  'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, uint8, bool)',
-  'function liquidity() view returns (uint128)',
-]
-const ERC20_ABI = ['function balanceOf(address) view returns (uint256)']
-
-async function getLivePoolState(poolAddr, provider) {
+// CHECK 3 — Live spread between pools
+async function check3_spread(p) {
   try {
-    const pool = new ethers.Contract(poolAddr, POOL_ABI, provider)
-    const [slot0, liq] = await Promise.all([pool.slot0(), pool.liquidity()])
-    const tick    = Number(slot0.tick)
-    const spacing = 10
-    return {
-      tick,
-      tickLower: Math.floor(tick / spacing) * spacing - spacing * 2,
-      tickUpper: Math.ceil(tick  / spacing) * spacing + spacing * 2,
-      liquidity: BigInt(liq),
-    }
-  } catch { return null }
-}
-
-async function getLiveSpread(pool1, pool2, provider) {
-  try {
-    const p1 = new ethers.Contract(pool1, POOL_ABI, provider)
-    const p2 = new ethers.Contract(pool2, POOL_ABI, provider)
+    const p1 = new ethers.Contract(UNI_POOLS.USDC_WETH_005, POOL_ABI, p)
+    const p2 = new ethers.Contract(UNI_POOLS.USDC_USDT_001, POOL_ABI, p)
     const [s1, s2] = await Promise.all([p1.slot0(), p2.slot0()])
     const price1 = (Number(s1.sqrtPriceX96) ** 2) / (2 ** 192) * 1e12
     const price2 = (Number(s2.sqrtPriceX96) ** 2) / (2 ** 192) * 1e12
     const spread = Math.abs(price1 - price2) / Math.min(price1, price2)
+    const pass   = spread * 100 >= CHECK.MIN_SPREAD_PCT
     return {
-      spread, price1, price2,
-      buyPool:  price1 < price2 ? pool1 : pool2,
-      sellPool: price1 < price2 ? pool2 : pool1,
-    }
-  } catch { return null }
-}
-
-// ── BUILD STRATEGY ────────────────────────────────────────────────────────────
-async function buildStrategy(cycleId, flashAmount, provider) {
-  const flashBN       = BigInt(Math.floor(flashAmount * 1e6))
-  const minProfitUSDC = BigInt(Math.floor(flashAmount * 0.001 * 1e6))
-  const strat         = cycleId % 3
-
-  if (strat === 0) {
-    const state = await getLivePoolState(UNI_POOLS.USDC_WETH_005, provider)
-    if (!state) return null
-    const data = ethers.AbiCoder.defaultAbiCoder().encode(
-      ['address', 'address', 'uint24', 'int24', 'int24', 'uint256'],
-      [USDC_POLYGON, WETH_POLYGON, 500, state.tickLower, state.tickUpper, minProfitUSDC]
-    )
-    return { strategy: 1, tokens: [USDC_POLYGON], amounts: [flashBN], data, name: 'JIT' }
-  }
-
-  if (strat === 1) {
-    const live = await getLiveSpread(UNI_POOLS.USDC_WETH_005, UNI_POOLS.USDC_USDT_001, provider)
-    if (!live || live.spread * 100 < CHECK.MIN_SPREAD_PCT) return null
-    const spreadProfit = BigInt(Math.floor(flashAmount * live.spread * 0.8 * 1e6))
-    const actualMin    = spreadProfit > minProfitUSDC ? minProfitUSDC : spreadProfit / 2n
-    const z1           = live.buyPool === UNI_POOLS.USDC_WETH_005
-    const data = ethers.AbiCoder.defaultAbiCoder().encode(
-      ['address', 'address', 'bool', 'bool', 'uint256'],
-      [UNI_POOLS.USDC_WETH_005, UNI_POOLS.USDC_USDT_001, z1, !z1, actualMin]
-    )
-    return { strategy: 2, tokens: [USDC_POLYGON], amounts: [flashBN], data, name: 'ARB', spread: live.spread }
-  }
-
-  if (strat === 2) {
-    const state    = await getLivePoolState(UNI_POOLS.USDC_WETH_005, provider)
-    if (!state) return null
-    const poolDepth = HOT[H.FLASH_BALANCER] || 0
-    if (poolDepth < flashAmount * 2) return null
-    const frontAmt  = flashBN * 30n / 100n
-    const data = ethers.AbiCoder.defaultAbiCoder().encode(
-      ['address', 'bool', 'uint256', 'uint256'],
-      [UNI_POOLS.USDC_WETH_005, true, frontAmt, minProfitUSDC]
-    )
-    return { strategy: 3, tokens: [USDC_POLYGON], amounts: [flashBN], data, name: 'SANDWICH' }
-  }
-
-  return null
-}
-
-// ── EXECUTE CYCLE ─────────────────────────────────────────────────────────────
-let activeExecs = 0
-const MAX_CONCURRENT = 3
-let cycleId = 0
-
-async function executeCycle() {
-  if (!CONTRACT.SENTINEL)            return
-  if (HOT[H.GAS_OK] === 0)          return
-  if (activeExecs >= MAX_CONCURRENT) return
-
-  const cycles = HOT[H.CYCLES_TODAY] || 0
-  const maxCyc = HOT[H.CYCLES_MAX]   || MAX_CYCLES_TODAY
-  if (cycles >= maxCyc)              return
-
-  activeExecs++
-  cycleId++
-  const thisId = cycleId
-  const t0     = Date.now()
-
-  try {
-    const reserveOK = await checkGasReserve()
-    if (!reserveOK) {
-      HOT[H.SKIP_TODAY] = (HOT[H.SKIP_TODAY] || 0) + 1
-      parentPort?.postMessage({ type: 'skip', cycleId: thisId, reason: 'gas reserve < $100' })
-      return
-    }
-
-    const check = await runAllChecks(HOT)
-
-    HOT[H.FLASH_LIVE]     = check.flashToUse || 0
-    HOT[H.FLASH_BALANCER] = check.flashBal   || 0
-    HOT[H.FLASH_AAVE]     = check.flashAave  || 0
-    HOT[H.GAS_PRICE]      = check.gasGwei    || 0
-    maticPriceCache       = check.maticPrice || 0.8
-
-    if (!check.go) {
-      HOT[H.SKIP_TODAY] = (HOT[H.SKIP_TODAY] || 0) + 1
-      parentPort?.postMessage({ type: 'skip', cycleId: thisId, reason: check.reason, failed: check.failed })
-      return
-    }
-
-    const flashAmount = check.flashToUse
-    const provider    = makeProvider()
-    const strat       = await buildStrategy(thisId, flashAmount, provider)
-
-    if (!strat) {
-      HOT[H.SKIP_TODAY] = (HOT[H.SKIP_TODAY] || 0) + 1
-      parentPort?.postMessage({ type: 'skip', cycleId: thisId, reason: 'no viable strategy' })
-      return
-    }
-
-    const receipt = await withNonce(async (nonce, p) => {
-      const signer   = new ethers.Wallet(EXECUTOR_PK, p)
-      const sentinel = new ethers.Contract(
-        CONTRACT.SENTINEL,
-        ['function execute(address[],uint256[],uint8,bytes,uint256) external'],
-        signer
-      )
-      const fee      = await p.getFeeData()
-      const rawGas   = fee.gasPrice || ethers.parseUnits('30', 'gwei')
-      const capGas   = GAS_CAP_GWEI * BigInt(1e9)
-      const gasPrice = (rawGas > capGas ? capGas : rawGas) * GAS_MARKUP / 100n
-      return (await sentinel.execute(
-        strat.tokens, strat.amounts, strat.strategy, strat.data, BigInt(thisId),
-        { gasLimit: GAS_LIMIT, gasPrice, nonce }
-      )).wait(1)
-    })
-
-    // H.EXEC_SPEED — slot 12 — correct name from config
-    HOT[H.EXEC_SPEED] = Date.now() - t0
-
-    if (receipt?.status === 1) {
-      const usdc   = new ethers.Contract(USDC_POLYGON, ERC20_ABI, makeProvider())
-      const tBal   = Number(await usdc.balanceOf(TREASURY)) / 1e6
-      const prev   = HOT[H.VAULT_CONFIRMED] || 0
-      const profit = Math.max(0, tBal - prev)
-
-      HOT[H.VAULT_CONFIRMED] = tBal
-      HOT[H.CYCLES_TODAY]    = (HOT[H.CYCLES_TODAY]    || 0) + 1
-      HOT[H.CYCLES_TOTAL]    = (HOT[H.CYCLES_TOTAL]    || 0) + 1
-      HOT[H.SUCCESS_TODAY]   = (HOT[H.SUCCESS_TODAY]   || 0) + 1
-      HOT[H.REV_TODAY]       = (HOT[H.REV_TODAY]       || 0) + profit
-      HOT[H.REV_TOTAL]       = (HOT[H.REV_TOTAL]       || 0) + profit
-      HOT[H.VAULT_COMPUTED]  = (HOT[H.VAULT_COMPUTED]  || 0) + profit
-
-      const gasCost = Number(GAS_LIMIT * (receipt.gasPrice || 0n)) / 1e18
-      HOT[H.GAS_SPENT] = (HOT[H.GAS_SPENT] || 0) + gasCost
-
-      HOT[H.MEV_JIT]      = (HOT[H.MEV_JIT]      || 0) + (strat.strategy === 1 ? 1 : 0)
-      HOT[H.MEV_ARB]      = (HOT[H.MEV_ARB]      || 0) + (strat.strategy === 2 ? 1 : 0)
-      HOT[H.MEV_SANDWICH] = (HOT[H.MEV_SANDWICH] || 0) + (strat.strategy === 3 ? 1 : 0)
-
-      if ((HOT[H.FIRST_REV] || 0) === 0 && profit > 0) HOT[H.FIRST_REV] = 1
-
-      clearLivecheckCache()
-
-      parentPort?.postMessage({
-        type: 'cycle', cycleId: thisId, profit,
-        flash: flashAmount, strategy: strat.strategy,
-        stratName: strat.name, elapsed: Date.now() - t0, txHash: receipt.hash,
-      })
-
-      if ((HOT[H.CYCLES_TODAY] || 0) % 10 === 0) {
-        const rev = HOT[H.REV_TODAY] || 0
-        const fmt = rev >= 1e6 ? `$${(rev/1e6).toFixed(3)}M` : `$${rev.toFixed(2)}`
-        console.log(`[EXECUTOR] ${HOT[H.CYCLES_TODAY]} cycles | ${fmt} today | ${strat.name} $${profit.toFixed(2)} | ${Date.now()-t0}ms`)
-      }
-    } else {
-      HOT[H.FAIL_TODAY] = (HOT[H.FAIL_TODAY] || 0) + 1
+      pass, spread, price1, price2,
+      buyPool:  price1 < price2 ? UNI_POOLS.USDC_WETH_005 : UNI_POOLS.USDC_USDT_001,
+      sellPool: price1 < price2 ? UNI_POOLS.USDC_USDT_001 : UNI_POOLS.USDC_WETH_005,
+      detail: `spread ${(spread*100).toFixed(4)}%`,
     }
   } catch (e) {
-    HOT[H.FAIL_TODAY] = (HOT[H.FAIL_TODAY] || 0) + 1
-    if (process.env.DEBUG) console.log(`[EXECUTOR] cycle ${thisId}: ${e.message?.slice(0,100)}`)
-  } finally {
-    activeExecs--
+    return { pass: false, spread: 0, detail: `spread check failed` }
   }
 }
 
-// ── 1ms BLOCK CADENCE RING ────────────────────────────────────────────────────
-let blockQueue = 0
-
-setInterval(() => {
-  if (blockQueue > 0 && activeExecs < MAX_CONCURRENT) {
-    blockQueue--
-    executeCycle().catch(() => {})
+// CHECK 4 — Oracle freshness
+async function check4_oracle(p) {
+  try {
+    const feeds = [
+      { name: 'ETH',   addr: CHAINLINK.ETH_USD   },
+      { name: 'MATIC', addr: CHAINLINK.MATIC_USD  },
+      { name: 'USDC',  addr: CHAINLINK.USDC_USD   },
+    ]
+    const now = Math.floor(Date.now() / 1000)
+    let ethPrice = 0, maticPrice = 0
+    for (const feed of feeds) {
+      const o = new ethers.Contract(feed.addr, ORACLE_ABI, p)
+      const [, ans,, updatedAt,] = await o.latestRoundData()
+      const age = now - Number(updatedAt)
+      if (age > CHECK.MAX_ORACLE_AGE_SEC)
+        return { pass: false, ethPrice: 0, maticPrice: 0,
+          detail: `${feed.name} stale ${age}s` }
+      if (feed.name === 'ETH')   ethPrice   = Number(ans) / 1e8
+      if (feed.name === 'MATIC') maticPrice = Number(ans) / 1e8
+    }
+    return { pass: true, ethPrice, maticPrice,
+      detail: `ETH $${ethPrice.toFixed(0)} MATIC $${maticPrice.toFixed(4)}` }
+  } catch (e) {
+    return { pass: false, ethPrice: 0, maticPrice: 0, detail: `oracle failed` }
   }
-}, 1)
+}
 
-parentPort?.on('message', msg => {
-  if (msg?.type === 'block' || msg?.type === 'swap') blockQueue++
-})
+// CHECK 5 — Pool depth vs flash size
+async function check5_depth(p, flashToUse) {
+  try {
+    const usdc  = new ethers.Contract(USDC_POLYGON, ERC20_ABI, p)
+    const raw   = await usdc.balanceOf(UNI_POOLS.USDC_WETH_005)
+    const depth = Number(raw) / 1e6
+    const slip  = flashToUse > 0 ? (flashToUse / depth) * 100 : 0
+    const pass  = slip <= CHECK.MAX_SLIPPAGE_PCT
+    return { pass, depth, slippage: slip,
+      detail: `pool $${(depth/1e6).toFixed(2)}M | slip ${slip.toFixed(3)}%` }
+  } catch (e) {
+    return { pass: true, depth: 0, slippage: 0, detail: `depth skipped` }
+  }
+}
 
-// Polygon fallback — every 2.12s if no block signal
-setInterval(() => { blockQueue++ }, 2120)
+// CHECK 6 — Treasury reconciliation (never blocks)
+async function check6_treasury(p, HOT) {
+  try {
+    const usdc = new ethers.Contract(USDC_POLYGON, ERC20_ABI, p)
+    const bal  = Number(await usdc.balanceOf(TREASURY)) / 1e6
+    if (HOT) {
+      HOT[H.VAULT_CONFIRMED] = bal
+      const computed = HOT[H.VAULT_COMPUTED] || 0
+      if (computed > 0)
+        HOT[H.RECONCILE_SCORE] = Math.min(100, (bal / computed) * 100)
+    }
+    return { pass: true, balance: bal,
+      detail: `treasury $${bal.toLocaleString()} USDC` }
+  } catch (e) {
+    return { pass: true, balance: 0, detail: `treasury read failed` }
+  }
+}
 
-// Reserve check every 60s
-setInterval(() => { checkGasReserve().catch(() => {}) }, 60_000)
+// CHECK 7 — Propeller ceiling + gas budget
+function check7_capacity(HOT) {
+  const used     = HOT[H.CYCLES_TODAY] || 0
+  const max      = HOT[H.CYCLES_MAX]   || MAX_CYCLES_TODAY
+  const gasSpent = HOT[H.GAS_SPENT]    || 0
+  const pass     = used < max && gasSpent < DAILY_GAS_BUDGET
+  return { pass, used, max, gasSpent,
+    detail: `${used}/${max} cycles | ${gasSpent.toFixed(3)} POL gas` }
+}
 
-console.log(`[EXECUTOR] 1ms ring | 7-point live check | gas reserve $${GAS_RESERVE_USD} | live strategy | max ${MAX_CONCURRENT} concurrent`)
+// ── RUN ALL 7 ─────────────────────────────────────────────────────────────────
+export async function runAllChecks(HOT) {
+  const now = Date.now()
+  if (_cache && now - _cacheTs < CACHE_TTL) return _cache
+
+  const p = getProvider()
+
+  const r1 = await check1_flash(p)
+  if (!r1.pass) return _set({ go: false, failed: 1, reason: r1.detail, flashToUse: 0, gasGwei: 0, spread: 0 })
+
+  const [r2, r3, r4] = await Promise.all([
+    check2_gas(p, r1.flashToUse),
+    check3_spread(p),
+    check4_oracle(p),
+  ])
+
+  if (!r2.pass) return _set({ go: false, failed: 2, reason: r2.detail, flashToUse: r1.flashToUse, gasGwei: r2.gasGwei, spread: 0 })
+  if (!r3.pass) return _set({ go: false, failed: 3, reason: r3.detail, flashToUse: r1.flashToUse, gasGwei: r2.gasGwei, spread: 0 })
+  if (!r4.pass) return _set({ go: false, failed: 4, reason: r4.detail, flashToUse: r1.flashToUse, gasGwei: r2.gasGwei, spread: r3.spread })
+
+  const r5 = await check5_depth(p, r1.flashToUse)
+  if (!r5.pass) return _set({ go: false, failed: 5, reason: r5.detail, flashToUse: r1.flashToUse, gasGwei: r2.gasGwei, spread: r3.spread })
+
+  const r6 = await check6_treasury(p, HOT)
+  const r7  = check7_capacity(HOT)
+  if (!r7.pass) return _set({ go: false, failed: 7, reason: r7.detail, flashToUse: r1.flashToUse, gasGwei: r2.gasGwei, spread: r3.spread })
+
+  // Write live data to HOT
+  HOT[H.FLASH_LIVE]      = r1.flashToUse
+  HOT[H.FLASH_BALANCER]  = r1.balancer
+  HOT[H.FLASH_AAVE]      = r1.aave
+  HOT[H.GAS_PRICE]       = r2.gasGwei
+  HOT[H.GAS_OK]          = 1
+  HOT[H.CHECK1_PASS]     = (HOT[H.CHECK1_PASS] || 0) + 1
+  HOT[H.CHECK2_PASS]     = (HOT[H.CHECK2_PASS] || 0) + 1
+  HOT[H.CHECK3_PASS]     = (HOT[H.CHECK3_PASS] || 0) + 1
+  HOT[H.CHECK4_PASS]     = (HOT[H.CHECK4_PASS] || 0) + 1
+  HOT[H.CHECK5_PASS]     = (HOT[H.CHECK5_PASS] || 0) + 1
+  HOT[H.CHECK6_PASS]     = (HOT[H.CHECK6_PASS] || 0) + 1
+  HOT[H.CHECK7_PASS]     = (HOT[H.CHECK7_PASS] || 0) + 1
+
+  return _set({
+    go:          true,
+    failed:      0,
+    reason:      'all pass',
+    flashToUse:  r1.flashToUse,
+    flashBal:    r1.balancer,
+    flashAave:   r1.aave,
+    gasGwei:     r2.gasGwei,
+    spread:      r3.spread,
+    buyPool:     r3.buyPool,
+    sellPool:    r3.sellPool,
+    ethPrice:    r4.ethPrice,
+    maticPrice:  r4.maticPrice,
+    poolDepth:   r5.depth,
+    treasuryBal: r6.balance,
+    results:     { r1, r2, r3, r4, r5, r6, r7 },
+  })
+}
+
+function _set(result) {
+  _cache   = result
+  _cacheTs = Date.now()
+  return result
+}
+
+export function clearLivecheckCache() { _cache = null; _cacheTs = 0 }
+
+async function getMATICPrice(p) {
+  try {
+    const o = new ethers.Contract(CHAINLINK.MATIC_USD, ORACLE_ABI, p)
+    const [, ans,,] = await o.latestRoundData()
+    return Number(ans) / 1e8
+  } catch { return 0.8 }
+}
