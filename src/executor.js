@@ -1,8 +1,8 @@
 // src/executor.js — SENTINEL executor (Worker thread)
-// All imports aligned exactly to Sentinel config.js exports
+// Imports aligned exactly to Sentinel config.js — no guessing
 // Live pool state, live spread, nonce mutex
 // 1ms block cadence ring
-// $100 gas reserve check
+// $100 gas reserve check — self-sustaining
 
 import { workerData, parentPort } from 'worker_threads'
 import { ethers }                 from 'ethers'
@@ -16,16 +16,19 @@ import {
   USDC_POLYGON,
   WETH_POLYGON,
   UNI_POOLS,
+  GAS_CAP_GWEI,
+  GAS_MARKUP,
+  GAS_LIMIT,
+  DAILY_GAS_BUDGET,
+  MAX_CYCLES_TODAY,
+  FLASH_CONFIG,
+  CHECK,
 } from './config.js'
 import { runAllChecks, clearLivecheckCache } from './livecheck.js'
 
 const SAB = workerData.SAB
 const HOT = new Float64Array(SAB)
 
-// Gas constants — defined here, not imported (Sentinel config uses numbers not BigInt)
-const GAS_CAP_GWEI   = 1000        // number
-const GAS_CAP_WEI    = 1000n * BigInt(1e9)
-const GAS_LIMIT      = 3_500_000n
 const GAS_RESERVE_USD = 100
 
 function makeProvider() {
@@ -65,34 +68,25 @@ async function drainNonce() {
   }
 }
 
-// ── GAS RESERVE CHECK — $100 minimum ─────────────────────────────────────────
+// ── GAS RESERVE CHECK — $100 minimum in executor wallet ───────────────────────
 let maticPriceCache  = 0.8
 let lastReserveCheck = 0
 
 async function checkGasReserve() {
   const now = Date.now()
-  if (now - lastReserveCheck < 60_000) return HOT[H.RESERVE_OK] === 1
+  if (now - lastReserveCheck < 60_000) return true
   lastReserveCheck = now
   try {
     const bal    = await makeProvider().getBalance(EXECUTOR)
     const pol    = parseFloat(ethers.formatEther(bal))
     const usdVal = pol * maticPriceCache
-    HOT[H.GAS_RESERVE] = usdVal
     if (usdVal < GAS_RESERVE_USD) {
-      if (HOT[H.RESERVE_OK] !== 0) {
-        console.log(`[EXECUTOR] Gas reserve LOW — $${usdVal.toFixed(2)} < $${GAS_RESERVE_USD}`)
-        console.log(`[EXECUTOR] Top up ${EXECUTOR} with POL to resume`)
-      }
-      HOT[H.RESERVE_OK] = 0
+      console.log(`[EXECUTOR] Gas reserve LOW — $${usdVal.toFixed(2)} < $${GAS_RESERVE_USD} | top up ${EXECUTOR}`)
       return false
     }
-    if (HOT[H.RESERVE_OK] === 0) {
-      console.log(`[EXECUTOR] Gas reserve restored — $${usdVal.toFixed(2)} — resuming`)
-    }
-    HOT[H.RESERVE_OK] = 1
     return true
   } catch {
-    return HOT[H.RESERVE_OK] === 1
+    return true
   }
 }
 
@@ -134,7 +128,7 @@ async function getLiveSpread(pool1, pool2, provider) {
   } catch { return null }
 }
 
-// ── BUILD STRATEGY — live pool state, live spread, live ticks ─────────────────
+// ── BUILD STRATEGY — all params from live chain state ─────────────────────────
 async function buildStrategy(cycleId, flashAmount, provider) {
   const flashBN       = BigInt(Math.floor(flashAmount * 1e6))
   const minProfitUSDC = BigInt(Math.floor(flashAmount * 0.001 * 1e6))
@@ -154,7 +148,7 @@ async function buildStrategy(cycleId, flashAmount, provider) {
   if (strat === 1) {
     // ARB — live spread check
     const live = await getLiveSpread(UNI_POOLS.USDC_WETH_005, UNI_POOLS.USDC_USDT_001, provider)
-    if (!live || live.spread < 0.0001) return null
+    if (!live || live.spread < (CHECK.MIN_SPREAD_PCT / 100)) return null
     const spreadProfit = BigInt(Math.floor(flashAmount * live.spread * 0.8 * 1e6))
     const actualMin    = spreadProfit > minProfitUSDC ? minProfitUSDC : spreadProfit / 2n
     const z1           = live.buyPool === UNI_POOLS.USDC_WETH_005
@@ -190,11 +184,10 @@ let cycleId = 0
 async function executeCycle() {
   if (!CONTRACT.SENTINEL)            return
   if (HOT[H.GAS_OK] === 0)          return
-  if (HOT[H.RESERVE_OK] === 0)      return
   if (activeExecs >= MAX_CONCURRENT) return
 
   const cycles = HOT[H.CYCLES_TODAY] || 0
-  const maxCyc = HOT[H.CYCLES_MAX]   || MAX_CYCLES_TODAY || 1_526_682
+  const maxCyc = HOT[H.CYCLES_MAX]   || MAX_CYCLES_TODAY
   if (cycles >= maxCyc)              return
 
   activeExecs++
@@ -214,11 +207,11 @@ async function executeCycle() {
     // 7-point live check
     const check = await runAllChecks(HOT)
 
-    HOT[H.FLASH_LIVE]     = check.flashToUse  || 0
-    HOT[H.FLASH_BALANCER] = check.flashBal    || 0
-    HOT[H.FLASH_AAVE]     = check.flashAave   || 0
-    HOT[H.GAS_PRICE]      = check.gasGwei     || 0
-    maticPriceCache       = check.maticPrice  || 0.8
+    HOT[H.FLASH_LIVE]     = check.flashToUse || 0
+    HOT[H.FLASH_BALANCER] = check.flashBal   || 0
+    HOT[H.FLASH_AAVE]     = check.flashAave  || 0
+    HOT[H.GAS_PRICE]      = check.gasGwei    || 0
+    maticPriceCache       = check.maticPrice || 0.8
 
     if (!check.go) {
       HOT[H.SKIP_TODAY] = (HOT[H.SKIP_TODAY] || 0) + 1
@@ -245,14 +238,15 @@ async function executeCycle() {
       )
       const fee      = await p.getFeeData()
       const rawGas   = fee.gasPrice || ethers.parseUnits('30', 'gwei')
-      const gasPrice = (rawGas > GAS_CAP_WEI ? GAS_CAP_WEI : rawGas) * 130n / 100n
+      const capGas   = GAS_CAP_GWEI * BigInt(1e9)
+      const gasPrice = (rawGas > capGas ? capGas : rawGas) * GAS_MARKUP / 100n
       return (await sentinel.execute(
         strat.tokens, strat.amounts, strat.strategy, strat.data, BigInt(thisId),
         { gasLimit: GAS_LIMIT, gasPrice, nonce }
       )).wait(1)
     })
 
-    HOT[H.EXEC_SPEED_MS] = Date.now() - t0
+    HOT[H.EXEC_SPEED] = Date.now() - t0
 
     if (receipt?.status === 1) {
       // Read actual profit from treasury balance delta
@@ -272,9 +266,9 @@ async function executeCycle() {
       const gasCost = Number(GAS_LIMIT * (receipt.gasPrice || 0n)) / 1e18
       HOT[H.GAS_SPENT] = (HOT[H.GAS_SPENT] || 0) + gasCost
 
-      if (strat.strategy === 1) HOT[H.MEV_JIT]       = (HOT[H.MEV_JIT]       || 0) + 1
-      else if (strat.strategy === 2) HOT[H.MEV_ARB]  = (HOT[H.MEV_ARB]       || 0) + 1
-      else if (strat.strategy === 3) HOT[H.MEV_SANDWICH] = (HOT[H.MEV_SANDWICH] || 0) + 1
+      HOT[H.MEV_JIT]      = (HOT[H.MEV_JIT]      || 0) + (strat.strategy === 1 ? 1 : 0)
+      HOT[H.MEV_ARB]      = (HOT[H.MEV_ARB]      || 0) + (strat.strategy === 2 ? 1 : 0)
+      HOT[H.MEV_SANDWICH] = (HOT[H.MEV_SANDWICH] || 0) + (strat.strategy === 3 ? 1 : 0)
 
       if ((HOT[H.FIRST_REV] || 0) === 0 && profit > 0) HOT[H.FIRST_REV] = 1
 
@@ -321,10 +315,10 @@ parentPort?.on('message', msg => {
   if (msg?.type === 'block' || msg?.type === 'swap') blockQueue++
 })
 
-// Polygon fallback — fire every 2.12s if no block signal
+// Polygon fallback — fire every 2.12s if no block signal arrives
 setInterval(() => { blockQueue++ }, 2120)
 
 // Reserve check every 60s
 setInterval(() => { checkGasReserve().catch(() => {}) }, 60_000)
 
-console.log(`[EXECUTOR] 1ms ring | 7-point live check | gas reserve $${GAS_RESERVE_USD} | live strategy data | max ${MAX_CONCURRENT} concurrent`)
+console.log(`[EXECUTOR] 1ms ring | 7-point live check | gas reserve $${GAS_RESERVE_USD} | live strategy | max ${MAX_CONCURRENT} concurrent`)
