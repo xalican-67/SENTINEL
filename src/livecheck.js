@@ -1,11 +1,11 @@
 // src/livecheck.js — SENTINEL live pre-execution check
-// algorithm.js style — all imports exact match to config.js exports
+// 7-point check before every cycle
+// Zero imports that don't exist in config.js
 
 import { ethers } from 'ethers'
 import {
   PRIMARY_CHAIN,
   BALANCER_VAULT,
-  AAVE_POOL_POLYGON,
   USDC_POLYGON,
   WETH_POLYGON,
   CHAINLINK,
@@ -22,6 +22,7 @@ const ERC20_ABI  = ['function balanceOf(address) view returns (uint256)']
 const ORACLE_ABI = ['function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)']
 const POOL_ABI   = ['function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, uint8, bool)']
 
+// aUSDC on Polygon — proxy for Aave available USDC flash
 const A_USDC = '0x625E7708f30cA75bfd92586e17077590C60eb4cD'
 
 let _provider = null
@@ -38,7 +39,7 @@ function getProvider() {
   return _provider
 }
 
-// CHECK 1 — Live flash capital
+// CHECK 1 — Live flash capital from Balancer + Aave
 async function check1_flash(p) {
   try {
     const usdc = new ethers.Contract(USDC_POLYGON, ERC20_ABI, p)
@@ -56,20 +57,22 @@ async function check1_flash(p) {
       detail:     `Balancer $${(balancer/1e6).toFixed(2)}M | Aave $${(aave/1e6).toFixed(2)}M`,
     }
   } catch (e) {
-    return { pass: false, balancer: 0, aave: 0, total: 0, flashToUse: 0,
-      detail: `flash read failed: ${e.message?.slice(0,50)}` }
+    return {
+      pass: false, balancer: 0, aave: 0, total: 0, flashToUse: 0,
+      detail: `flash read failed: ${e.message?.slice(0, 50)}`,
+    }
   }
 }
 
 // CHECK 2 — Gas cost vs expected profit
 async function check2_gas(p, flashToUse) {
   try {
-    const fee     = await p.getFeeData()
-    const gwei    = Number(fee.gasPrice || 0n) / 1e9
-    const matic   = await getMATICPrice(p)
-    const gasCost = gwei * 3_500_000 * 1e-9 * matic
+    const fee       = await p.getFeeData()
+    const gwei      = Number(fee.gasPrice || 0n) / 1e9
+    const matic     = await getMATICPrice(p)
+    const gasCost   = gwei * 3_500_000 * 1e-9 * matic
     const minProfit = flashToUse * FLASH_CONFIG.extraction_rate
-    const pass = gwei <= 1000 && gasCost < minProfit * CHECK.MAX_GAS_PCT
+    const pass      = gwei <= 1000 && gasCost < minProfit * CHECK.MAX_GAS_PCT
     return { pass, gasGwei: gwei, gasCostUSD: gasCost, maticPrice: matic,
       detail: `${gwei.toFixed(1)} gwei | gas $${gasCost.toFixed(2)}` }
   } catch (e) {
@@ -78,7 +81,7 @@ async function check2_gas(p, flashToUse) {
   }
 }
 
-// CHECK 3 — Live spread between pools
+// CHECK 3 — Live spread between two pools
 async function check3_spread(p) {
   try {
     const p1 = new ethers.Contract(UNI_POOLS.USDC_WETH_005, POOL_ABI, p)
@@ -92,7 +95,7 @@ async function check3_spread(p) {
       pass, spread, price1, price2,
       buyPool:  price1 < price2 ? UNI_POOLS.USDC_WETH_005 : UNI_POOLS.USDC_USDT_001,
       sellPool: price1 < price2 ? UNI_POOLS.USDC_USDT_001 : UNI_POOLS.USDC_WETH_005,
-      detail: `spread ${(spread*100).toFixed(4)}%`,
+      detail: `spread ${(spread * 100).toFixed(4)}%`,
     }
   } catch (e) {
     return { pass: false, spread: 0, detail: `spread check failed` }
@@ -141,7 +144,7 @@ async function check5_depth(p, flashToUse) {
   }
 }
 
-// CHECK 6 — Treasury reconciliation (never blocks)
+// CHECK 6 — Treasury reconciliation (never blocks execution)
 async function check6_treasury(p, HOT) {
   try {
     const usdc = new ethers.Contract(USDC_POLYGON, ERC20_ABI, p)
@@ -159,7 +162,7 @@ async function check6_treasury(p, HOT) {
   }
 }
 
-// CHECK 7 — Propeller ceiling + gas budget
+// CHECK 7 — Propeller ceiling + daily gas budget
 function check7_capacity(HOT) {
   const used     = HOT[H.CYCLES_TODAY] || 0
   const max      = HOT[H.CYCLES_MAX]   || MAX_CYCLES_TODAY
@@ -177,7 +180,8 @@ export async function runAllChecks(HOT) {
   const p = getProvider()
 
   const r1 = await check1_flash(p)
-  if (!r1.pass) return _set({ go: false, failed: 1, reason: r1.detail, flashToUse: 0, gasGwei: 0, spread: 0 })
+  if (!r1.pass) return _set({ go: false, failed: 1, reason: r1.detail,
+    flashToUse: 0, gasGwei: 0, spread: 0, flashBal: 0, flashAave: 0, maticPrice: 0.8 })
 
   const [r2, r3, r4] = await Promise.all([
     check2_gas(p, r1.flashToUse),
@@ -185,30 +189,43 @@ export async function runAllChecks(HOT) {
     check4_oracle(p),
   ])
 
-  if (!r2.pass) return _set({ go: false, failed: 2, reason: r2.detail, flashToUse: r1.flashToUse, gasGwei: r2.gasGwei, spread: 0 })
-  if (!r3.pass) return _set({ go: false, failed: 3, reason: r3.detail, flashToUse: r1.flashToUse, gasGwei: r2.gasGwei, spread: 0 })
-  if (!r4.pass) return _set({ go: false, failed: 4, reason: r4.detail, flashToUse: r1.flashToUse, gasGwei: r2.gasGwei, spread: r3.spread })
+  if (!r2.pass) return _set({ go: false, failed: 2, reason: r2.detail,
+    flashToUse: r1.flashToUse, flashBal: r1.balancer, flashAave: r1.aave,
+    gasGwei: r2.gasGwei, spread: 0, maticPrice: r2.maticPrice })
+
+  if (!r3.pass) return _set({ go: false, failed: 3, reason: r3.detail,
+    flashToUse: r1.flashToUse, flashBal: r1.balancer, flashAave: r1.aave,
+    gasGwei: r2.gasGwei, spread: 0, maticPrice: r2.maticPrice })
+
+  if (!r4.pass) return _set({ go: false, failed: 4, reason: r4.detail,
+    flashToUse: r1.flashToUse, flashBal: r1.balancer, flashAave: r1.aave,
+    gasGwei: r2.gasGwei, spread: r3.spread, maticPrice: r4.maticPrice })
 
   const r5 = await check5_depth(p, r1.flashToUse)
-  if (!r5.pass) return _set({ go: false, failed: 5, reason: r5.detail, flashToUse: r1.flashToUse, gasGwei: r2.gasGwei, spread: r3.spread })
+  if (!r5.pass) return _set({ go: false, failed: 5, reason: r5.detail,
+    flashToUse: r1.flashToUse, flashBal: r1.balancer, flashAave: r1.aave,
+    gasGwei: r2.gasGwei, spread: r3.spread, maticPrice: r4.maticPrice })
 
   const r6 = await check6_treasury(p, HOT)
   const r7  = check7_capacity(HOT)
-  if (!r7.pass) return _set({ go: false, failed: 7, reason: r7.detail, flashToUse: r1.flashToUse, gasGwei: r2.gasGwei, spread: r3.spread })
+
+  if (!r7.pass) return _set({ go: false, failed: 7, reason: r7.detail,
+    flashToUse: r1.flashToUse, flashBal: r1.balancer, flashAave: r1.aave,
+    gasGwei: r2.gasGwei, spread: r3.spread, maticPrice: r4.maticPrice })
 
   // Write live data to HOT
-  HOT[H.FLASH_LIVE]      = r1.flashToUse
-  HOT[H.FLASH_BALANCER]  = r1.balancer
-  HOT[H.FLASH_AAVE]      = r1.aave
-  HOT[H.GAS_PRICE]       = r2.gasGwei
-  HOT[H.GAS_OK]          = 1
-  HOT[H.CHECK1_PASS]     = (HOT[H.CHECK1_PASS] || 0) + 1
-  HOT[H.CHECK2_PASS]     = (HOT[H.CHECK2_PASS] || 0) + 1
-  HOT[H.CHECK3_PASS]     = (HOT[H.CHECK3_PASS] || 0) + 1
-  HOT[H.CHECK4_PASS]     = (HOT[H.CHECK4_PASS] || 0) + 1
-  HOT[H.CHECK5_PASS]     = (HOT[H.CHECK5_PASS] || 0) + 1
-  HOT[H.CHECK6_PASS]     = (HOT[H.CHECK6_PASS] || 0) + 1
-  HOT[H.CHECK7_PASS]     = (HOT[H.CHECK7_PASS] || 0) + 1
+  HOT[H.FLASH_LIVE]     = r1.flashToUse
+  HOT[H.FLASH_BALANCER] = r1.balancer
+  HOT[H.FLASH_AAVE]     = r1.aave
+  HOT[H.GAS_PRICE]      = r2.gasGwei
+  HOT[H.GAS_OK]         = 1
+  HOT[H.CHECK1_PASS]    = (HOT[H.CHECK1_PASS] || 0) + 1
+  HOT[H.CHECK2_PASS]    = (HOT[H.CHECK2_PASS] || 0) + 1
+  HOT[H.CHECK3_PASS]    = (HOT[H.CHECK3_PASS] || 0) + 1
+  HOT[H.CHECK4_PASS]    = (HOT[H.CHECK4_PASS] || 0) + 1
+  HOT[H.CHECK5_PASS]    = (HOT[H.CHECK5_PASS] || 0) + 1
+  HOT[H.CHECK6_PASS]    = (HOT[H.CHECK6_PASS] || 0) + 1
+  HOT[H.CHECK7_PASS]    = (HOT[H.CHECK7_PASS] || 0) + 1
 
   return _set({
     go:          true,
